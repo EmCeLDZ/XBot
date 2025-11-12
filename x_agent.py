@@ -38,6 +38,8 @@ RESEARCH_CATEGORIES = json.loads(os.getenv('RESEARCH_CATEGORIES'))
 SESSION_RESET_HOURS = int(os.getenv('SESSION_RESET_HOURS'))
 SELF_REFLECTION_HOURS = int(os.getenv('SELF_REFLECTION_HOURS'))
 LAST_SEEN_FILE = "last_seen.txt"; LAST_REFLECTION_FILE = "last_reflection.txt"; LAST_MENTIONS_CHECK_FILE = "last_mentions_check.txt"
+MIN_SLEEP_DURATION = int(os.getenv('MIN_SLEEP_DURATION'))
+MAX_SLEEP_DURATION = int(os.getenv('MAX_SLEEP_DURATION'))
 
 # --- Model & Chance Configuration ---
 REFLECTIVE_MODEL = "gpt-3.5-turbo"; CREATION_MODEL = "gpt-4-turbo"
@@ -222,15 +224,31 @@ def login_to_twitter(driver):
 # --- AI & Content Generation ---
 def get_autoreflaction_for_prompt(subject, current_goal, market_context=""):
     print(_("generating_reflection_context"))
+    strategic_insights = "No strategic insights found in memory."
     try:
-        query_text = "strategic insights about tweet performance"
+        # Create an embedding for the query to find relevant memories
+        query_text = f"strategic insights about {subject} and market sentiment"
         response = client_openai.embeddings.create(input=[query_text], model="text-embedding-3-small")
-        strategic_insights_data = vector_memory.query(query_embeddings=[response.data[0].embedding], n_results=3, where={"type": "insight"})
-        strategic_insights = "\n".join([f"- {doc}" for doc in (strategic_insights_data.get('documents', [[]])[0])])
+        
+        # Query the vector memory for the most relevant insights
+        strategic_insights_data = vector_memory.query(
+            query_embeddings=[response.data[0].embedding], 
+            n_results=2,  # Get the top 2 most relevant insights
+            where={"type": "insight"}
+        )
+        
+        # Format the insights if found
+        found_docs = strategic_insights_data.get('documents', [[]])[0]
+        if found_docs:
+            strategic_insights = "\n".join([f"- {doc}" for doc in found_docs])
+            # --- NEW LOGGING LINE ---
+            print(f"🧠 [Learning] Applying insights from memory:\n{strategic_insights}")
+            
     except Exception as e:
         print(_("memory_query_error", e=e))
-        strategic_insights = "Error."
-    return f"1. CONTEXTUAL SUMMARY:\n{market_context or 'No specific market event.'}\n\n2. STRATEGIC INSIGHTS:\n{strategic_insights or 'None.'}"
+        strategic_insights = "Error retrieving insights from memory."
+
+    return f"1. CONTEXTUAL SUMMARY:\n{market_context or 'No specific market event.'}\n\n2. STRATEGIC INSIGHTS FROM PAST PERFORMANCE (Your Memory):\n{strategic_insights}"
 
 def generate_tweet_content(market_context="", subject_override=None):
     observed_subject = subject_override or random.choice(CORE_TOPICS)
@@ -275,11 +293,12 @@ def _engage_with_thread(driver, target_tweet, engagement_type):
         robust_click(driver, post_button)
         WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, "//div[@data-testid='toast']")))
         print(_("comment_sent_success", target_tweet_id=target_tweet['id']))
-        cursor.execute("INSERT INTO engagements VALUES (datetime('now'), ?, ?, ?, ?)", (engagement_type, target_tweet['id'], reply_content, 'success')); conn.commit()
+        cursor.execute("INSERT INTO engagements VALUES (datetime('now'), ?, ?, ?, ?)", ('reply', target_tweet['id'], reply_content, 'success'))
+        conn.commit()
         log_action(engagement_type, target_tweet['id'], "SUCCESS")
     except Exception as e:
-        print(_("thread_engagement_error", e=e))
-        log_action(engagement_type, target_tweet.get('id', 'unknown'), f"FAILURE: {e}")
+        print(f"❌ Error while engaging with thread: {type(e).__name__} - {e}")
+        log_action(engagement_type, target_tweet.get('id', 'unknown'), f"FAILURE: {type(e).__name__} - {e}")
 
 # --- Core Agent Action Functions ---
 def post_tweet(driver, subject, content):
@@ -634,7 +653,7 @@ def perform_self_reflection(driver):
                     like_element = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, f"//a[contains(@href, '/status/{tweet_id}/likes')]//span[@data-testid='app-text-transition-container']")))
                     likes = int(like_element.text.replace(',', '')) if like_element.text else 0
                     cursor.execute("UPDATE observations SET likes=?, status=? WHERE tweet_id=?", (likes, 'reviewed', tweet_id)); conn.commit()
-                analysis_prompt = f"Analyze tweet performance:\n- Subject: {subject}\n- Likes: {likes}\nGenerate a single, concise strategic insight for future posts. What subject categories perform best?"
+                analysis_prompt = f""" Analyze the performance of this tweet: - Subject: {subject} - Likes: {likes} Based on its success (or failure), generate a single, actionable strategic insight for future content. Focus on the TONE, STYLE, or ANGLE, not just the topic.Example of a good insight: "Cryptic, data-driven statements about market volatility generate high engagement." Example of a bad insight: "Tweets about Solana are good." Generate the insight: """
                 response = client_openai.chat.completions.create(model=REFLECTIVE_MODEL, messages=[{"role": "user", "content": analysis_prompt}])
                 insight = response.choices[0].message.content.strip()
                 insights.append(insight)
@@ -670,8 +689,22 @@ def perform_self_reflection(driver):
 def evaluate_strategy(driver):
     global CURRENT_GOAL
     print(_("strategy_evaluating_state"))
-    last_action_info = action_history[-1] if action_history else (_("no_last_action"),)
-    log_debug(_("last_action", last_action=last_action_info[0]))
+    
+    # --- Start of New Logic: Action Cooldown ---
+    # Get the names of the last 3 actions performed
+    last_three_actions = [a[0] for a in action_history[-3:]]
+    log_debug(_("last_actions", actions=", ".join(last_three_actions) if last_three_actions else "None"))
+
+    # Base weights for actions
+    actions = {"BROWSE_FOLLOWING_FEED": 0.5, "CURIOSITY_DRIVEN_DISCOVERY": 0.3, "MONITOR_CORE_SUBJECTS": 0.2}
+
+    # Dynamically reduce weight of recently performed actions
+    for action_name in last_three_actions:
+        if action_name in actions:
+            actions[action_name] *= 0.25  # Drastically reduce the chance of repeating recent actions
+    
+    log_debug(_("dynamic_weights", weights=json.dumps({k: round(v, 2) for k, v in actions.items()})))
+    # --- End of New Logic ---
 
     if check_if_time_passed(LAST_REFLECTION_FILE, SELF_REFLECTION_HOURS):
         cursor.execute("SELECT 1 FROM observations WHERE status IN ('published', 'reviewed') LIMIT 1")
@@ -679,8 +712,6 @@ def evaluate_strategy(driver):
             CURRENT_GOAL = "SELF_REFLECTION"
             print(_("strategy_goal_self_reflection", goal=CURRENT_GOAL))
             return
-        else:
-            update_last_seen(LAST_REFLECTION_FILE)
 
     if check_if_time_passed(LAST_MENTIONS_CHECK_FILE, 0.16):
         update_last_seen(LAST_MENTIONS_CHECK_FILE)
@@ -694,12 +725,13 @@ def evaluate_strategy(driver):
     cursor.execute("SELECT timestamp FROM observations ORDER BY timestamp DESC LIMIT 1")
     last_post_time_str = cursor.fetchone()
     if not last_post_time_str or (datetime.now() - datetime.fromisoformat(last_post_time_str[0]) > timedelta(hours=4)):
-        if 'EXPAND_REACH' not in [a[0] for a in action_history[-3:]]:
+        # Check if the last action wasn't already posting to avoid post loops
+        if "EXPAND_REACH" not in last_three_actions:
             CURRENT_GOAL = "EXPAND_REACH"
             print(_("strategy_goal_expand_reach", goal=CURRENT_GOAL))
             return
 
-    actions = {"BROWSE_FOLLOWING_FEED": 0.5, "CURIOSITY_DRIVEN_DISCOVERY": 0.3, "MONITOR_CORE_SUBJECTS": 0.2}
+    # Choose the next action based on the new, dynamic weights
     CURRENT_GOAL = random.choices(list(actions.keys()), weights=list(actions.values()), k=1)[0]
     print(_("strategy_goal_weighted_random", goal=CURRENT_GOAL))
 
@@ -720,8 +752,10 @@ def run_agent():
             if not agent_running: break
             update_last_seen(LAST_SEEN_FILE)
             evaluate_strategy(driver)
-            
-            action_target = CURRENT_GOAL 
+            action_target = CURRENT_GOAL # Use the goal itself as the target for now
+            action_history.append((CURRENT_GOAL, action_target, datetime.now()))
+            if len(action_history) > 20:
+                action_history.pop(0)
             if CURRENT_GOAL == "EXPAND_REACH":
                 raw_market_data = conduct_market_research()
                 market_summary = analyze_market_context_for_prompt(raw_market_data)
@@ -745,7 +779,7 @@ def run_agent():
                 action_history.pop(0)
 
             if agent_running:
-                sleep_duration = random.randint(5, 10)
+                sleep_duration = random.randint(MIN_SLEEP_DURATION, MAX_SLEEP_DURATION)
                 print(_("cycle_complete_next_action", sleep_duration=sleep_duration))
                 for i in range(sleep_duration):
                     if not agent_running:
