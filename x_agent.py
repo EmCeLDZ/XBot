@@ -220,6 +220,27 @@ def login_to_twitter(driver):
     except:
         print(_("authorization_error"))
         return False
+def get_own_context_from_memory(query_text, n_results=2):
+    """
+    Retrieves the agent's own past posts from vector memory to provide context.
+    """
+    try:
+        response = client_openai.embeddings.create(input=[query_text], model="text-embedding-3-small")
+        # --- IMPORTANT: Filter for 'self_posted' type ---
+        memory_data = vector_memory.query(
+            query_embeddings=[response.data[0].embedding],
+            n_results=n_results,
+            where={"type": "self_posted"} 
+        )
+        
+        found_docs = memory_data.get('documents', [[]])[0]
+        if found_docs:
+            formatted_context = "\n".join([f"- {doc}" for doc in found_docs])
+            print(f"🧠 [Self-Awareness] Recalling own past thoughts:\n{formatted_context}")
+            return f"To maintain thematic consistency, I recall my own previous statements on this topic:\n{formatted_context}\n"
+    except Exception as e:
+        print(f"⚠️ Error recalling own context: {e}")
+    return "" # Return empty string if no context or error
 
 # --- AI & Content Generation ---
 def get_autoreflaction_for_prompt(subject, current_goal, market_context=""):
@@ -276,8 +297,14 @@ def _engage_with_thread(driver, target_tweet, engagement_type):
         driver.get(target_tweet['url'])
         random_delay(5, 8)
         if not agent_running: return
+        # --- NEW: Recall own context before replying ---
+        own_context = get_own_context_from_memory(target_tweet['text'])
         reflection_report = get_autoreflaction_for_prompt(f"Engage with {engagement_type}", CURRENT_GOAL, target_tweet['text'])
-        reply_prompt = prompt_template.format(observed_subject=f"a comment on a post: '{target_tweet['text']}'", successful_examples=reflection_report)
+        # --- MODIFIED: Inject self-awareness into the prompt ---
+        reply_prompt = prompt_template.format(
+            observed_subject=f"a comment on a post: '{target_tweet['text']}'", 
+            successful_examples=f"{own_context}\n{reflection_report}" # Prepend own context
+        )
         response = client_openai.chat.completions.create(model=CREATION_MODEL, messages=[{"role": "user", "content": reply_prompt}])
         reply_content = response.choices[0].message.content.strip().strip('"')
         if len(reply_content) > 280:
@@ -523,7 +550,18 @@ def analyze_market_context_for_prompt(raw_market_data):
 def monitor_core_subjects(driver):
     print(_("action_monitor_core_subjects"))
     log_action("monitor_core_subjects", "system", "STARTED")
-    target_profile = random.choice(CORE_TOPICS)
+
+    # --- NEW: Decide whether to monitor a core topic or a potential partner ---
+    if random.random() < 0.25: # 25% chance to check a potential partner
+        cursor.execute("SELECT screen_name FROM potential_partners WHERE status='discovered' ORDER BY RANDOM() LIMIT 1")
+        partner = cursor.fetchone()
+        if partner:
+            target_profile = partner[0]
+            print(f"🤝 [Networking] Proactively checking potential partner: {target_profile}")
+        else:
+            target_profile = random.choice(CORE_TOPICS) # Fallback if no partners
+    else: # 75% chance to check a core topic
+        target_profile = random.choice(CORE_TOPICS)
     try:
         driver.get(f"https://twitter.com/{target_profile[1:]}")
         random_delay(5,10)
@@ -658,9 +696,12 @@ def perform_self_reflection(driver):
                 insight = response.choices[0].message.content.strip()
                 insights.append(insight)
                 print(_("post_analysis_insight", tweet_id=tweet_id, likes=likes, insight=insight))
-                if likes > 5:
+                # --- NEW: Dynamic Interest Adaptation ---
+                if likes > 5: # If a post is reasonably successful
                     for category, weight in RESEARCH_CATEGORIES.items():
+                        # If the post's subject is related to a research category
                         if category.lower() in subject.lower() or subject.lower() in category.lower():
+                            # Increase the weight of that category (the more likes, the bigger the boost)
                             RESEARCH_CATEGORIES[category] = weight * (1.0 + (likes / 100.0))
             except Exception as e:
                 print(_("failed_to_analyze_post", tweet_id=tweet_id, e=e))
@@ -670,6 +711,13 @@ def perform_self_reflection(driver):
             for category in RESEARCH_CATEGORIES:
                 RESEARCH_CATEGORIES[category] /= total_weight
         
+        weights_json = json.dumps({k: round(v, 3) for k, v in RESEARCH_CATEGORIES.items()}, indent=2)
+        print(_("updated_category_weights", weights_json=weights_json))
+        # Normalize the weights so they sum up to 1 (or close to it)
+        total_weight = sum(RESEARCH_CATEGORIES.values())
+        if total_weight > 0:
+            for category in RESEARCH_CATEGORIES:
+                RESEARCH_CATEGORIES[category] /= total_weight
         weights_json = json.dumps({k: round(v, 3) for k, v in RESEARCH_CATEGORIES.items()}, indent=2)
         print(_("updated_category_weights", weights_json=weights_json))
         
