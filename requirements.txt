@@ -1,0 +1,8 @@
+openai
+python-dotenv
+selenium
+selenium-stealth
+pyperclip
+chromadb
+requests
+numpy

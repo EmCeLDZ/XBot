@@ -1,0 +1,33 @@
+# Environment variables
+.env
+
+# Python specific
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+
+# Local Databases 
+agent_state.db
+agent_memory_db/
+
+# Session and state files 
+twitter_session.pkl
+last_seen.txt
+last_reflection.txt
+last_mentions_check.txt
+
+# Browser profiles 
+brave_profile/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Log files (good practice to add)
+*.log
