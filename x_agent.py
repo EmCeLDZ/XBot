@@ -72,7 +72,27 @@ try:
 except Exception as e:
     exit(_("openai_init_error", e=e))
 
+_persona_primer_cache = None
+
+def get_persona_primer(template):
+    """
+    Extracts the first sentence from the main prompt template to use as a persona primer
+    for internal decision-making prompts. Caches the result for efficiency.
+    """
+    global _persona_primer_cache
+    if _persona_primer_cache is None:
+        try:
+            # Split by the first period and take the first part, then re-add the period.
+            primer = template.split('.')[0].strip() + "."
+            _persona_primer_cache = primer
+        except Exception:
+            # Fallback if the prompt is unusual
+            _persona_primer_cache = "You are an advanced AI agent."
+    return _persona_primer_cache
+
 prompt_template = os.getenv('PROMPT_TEMPLATE')
+persona_primer = get_persona_primer(prompt_template)
+
 if not prompt_template:
     print(_("prompt_template_not_found"))
     exit()
@@ -145,6 +165,8 @@ def type_via_clipboard(driver, element, text):
     robust_click(driver, element)
     time.sleep(0.5)
     ActionChains(driver).key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()
+
+    _persona_primer_cache = None
 
 def setup_driver():
     """
@@ -481,13 +503,15 @@ def browse_following_feed_and_engage(driver):
         print(_("identified_fresh_targets", len_fresh_targets=len(fresh_targets)))
         valid_indices = [t['index'] for t in fresh_targets]
         
-        # --- IMPROVED PROMPT WITH A REQUEST FOR JUSTIFICATION ---
+
+        # --- GENERIC PROMPT USING THE PERSONA PRIMER ---
         scoring_prompt = f"""
-        You are Dr. Pathogen. Analyze these FRESH tweets from your 'following' feed. Identify the single most intellectually stimulating one to comment on.
+        {persona_primer} Analyze these fresh tweets from your 'following' feed. Your task is to identify the single most intellectually stimulating one to comment on, consistent with your character.
+
         Valid indices are: {valid_indices}.
 
-        Return a JSON object with 'best_index' and a 'reason' for your choice.
-        Example: {{"best_index": {random.choice(valid_indices) if valid_indices else 0}, "reason": "This post discusses on-chain data, which is a core research area."}}
+        Return a JSON object with 'best_index' and a brief 'reason' for your choice.
+        Example: {{"best_index": {random.choice(valid_indices) if valid_indices else 0}, "reason": "This post aligns with my core research areas and allows for a nuanced, analytical comment."}}
         If none are truly worthy, return an empty JSON.
         """
         
@@ -536,7 +560,8 @@ def analyze_market_context_for_prompt(raw_market_data):
     print(_("running_internal_market_analyst"))
     if "unavailable" in raw_market_data:
         return "Market data was unavailable."
-    primer = "You are a market analyst. Based on raw data, provide a one-sentence clinical summary for Dr. Pathogen. Interpret BTC.D, F&G, and SOL's relative performance to BTC."
+    # --- GENERIC PROMPT USING THE PERSONA PRIMER ---
+    primer = f""" {persona_primer} You are currently in the role of a market analyst. Based on the raw data provided, your task is to generate a one-sentence summary for your own internal analysis. This summary should interpret the key data points (like BTC.D, F&G, and relative asset performance) in a style that matches your established persona. """
     prompt = f"{primer}\nRaw Data:\n{raw_market_data}\n\nProvide your one-sentence clinical summary:"
     try:
         response = client_openai.chat.completions.create(model=REFLECTIVE_MODEL, messages=[{"role": "user", "content": prompt}])
@@ -654,7 +679,8 @@ def curiosity_driven_discovery(driver):
                 
                 log_debug(_("passing_candidates_to_ai", len_candidates=len(candidate_threads)))
                 valid_indices = [t['index'] for t in candidate_threads]
-                scoring_prompt = f"You are Dr. Pathogen. Analyze these tweets about '{query}'. Identify the single most intellectually stimulating one. Valid indices are: {valid_indices}. Return JSON with 'best_index'."
+                # --- GENERIC PROMPT USING THE PERSONA PRIMER ---
+                scoring_prompt = f""" {persona_primer} Analyze these tweets discovered during a research expedition on the topic of '{query}'. Your objective is to identify the single most intellectually stimulating thread to engage with.Valid indices are: {valid_indices}.Return a JSON object containing only the 'best_index'. """
                 response = client_openai.chat.completions.create(model=REFLECTIVE_MODEL, response_format={"type": "json_object"}, messages=[{"role": "user", "content": scoring_prompt}])
                 decision = json.loads(response.choices[0].message.content)
                 best_index = decision.get("best_index")
