@@ -20,6 +20,30 @@ from selenium_stealth import stealth
 import pyperclip
 import chromadb
 import requests
+import argparse
+
+# --- Argument Parser for Debugging ---
+parser = argparse.ArgumentParser(description="Run the X_Agent with specific debugging flags.")
+parser.add_argument(
+    '--force-action', 
+    type=str, 
+    choices=[
+        'post', 
+        'mentions', 
+        'browse', 
+        'monitor', 
+        'discover', 
+        'reflect'
+    ],
+    help="Force the agent to run a single, specific action and then exit."
+)
+# --- NEW OPTIONAL ARGUMENT ---
+parser.add_argument(
+    '--target',
+    type=str,
+    help="Specify a target for the forced action (e.g., a Twitter handle for 'monitor')."
+)
+args = parser.parse_args()
 
 
 # --- X_Agent v2.1.0 (The Sentient Strategist) Configuration ---
@@ -572,66 +596,91 @@ def analyze_market_context_for_prompt(raw_market_data):
         print(_("internal_analyst_error", e=e))
         return "Failed to analyze market state."
 
-def monitor_core_subjects(driver):
+def monitor_core_subjects(driver, target_override=None):
     print(_("action_monitor_core_subjects"))
     log_action("monitor_core_subjects", "system", "STARTED")
 
-    # --- NEW: Decide whether to monitor a core topic or a potential partner ---
-    if random.random() < 0.25: # 25% chance to check a potential partner
+    # --- NEW: Logic to handle the override ---
+    if target_override:
+        target_profile = target_override
+        print(f"🎯 [Debug] Overriding target to: {target_profile}")
+    # --- Original logic runs if no override is provided ---
+    elif random.random() < 0.25:
         cursor.execute("SELECT screen_name FROM potential_partners WHERE status='discovered' ORDER BY RANDOM() LIMIT 1")
         partner = cursor.fetchone()
         if partner:
             target_profile = partner[0]
             print(f"🤝 [Networking] Proactively checking potential partner: {target_profile}")
         else:
-            target_profile = random.choice(CORE_TOPICS) # Fallback if no partners
-    else: # 75% chance to check a core topic
+            target_profile = random.choice(CORE_TOPICS)
+    else:
         target_profile = random.choice(CORE_TOPICS)
     try:
-        driver.get(f"https://twitter.com/{target_profile[1:]}")
-        random_delay(5,10)
-        tweets = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
-        if not tweets:
+        driver.get(f"https://twitter.com/{target_profile.strip('@')}") # Use .strip('@') for safety
+        random_delay(5, 10)
+        
+        # Find initial tweets to determine the number of iterations
+        initial_tweets = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
+        if not initial_tweets:
             log_debug(_("no_tweets_on_profile", target_profile=target_profile))
             return
 
-        # Analyze more tweets by increasing the sample size and removing the break
-        for target_tweet in random.sample(tweets, min(len(tweets), 5)): # Increased sample size to 5
+        # We will iterate a fixed number of times, re-finding the element each time
+        # to avoid the StaleElementReferenceException.
+        # We sample up to 5 tweets.
+        num_tweets_to_check = min(len(initial_tweets), 5)
+        
+        for i in range(num_tweets_to_check):
+            if not agent_running: return
             try:
+                # Re-find all tweets in every iteration to get the fresh state
+                all_current_tweets = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
+                
+                # If the page structure changed and we can't find the tweet, skip
+                if i >= len(all_current_tweets):
+                    log_debug(f"Could not re-find tweet at index {i}, DOM likely changed. Skipping.")
+                    continue
+                
+                target_tweet = all_current_tweets[i]
+
                 tweet_text = target_tweet.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text
                 log_debug(_("scanning_post", tweet_text_preview=tweet_text[:40]))
                 
-                # ... (logic for finding partners remains the same) ...
+                # --- Logic for finding partners ---
                 mentioned_handles = re.findall(r'@(\w+)', tweet_text)
-                if not mentioned_handles:
-                    log_debug("No mentions found in this tweet.")
+                if mentioned_handles:
+                    for handle in mentioned_handles:
+                        screen_name = f"@{handle}"
+                        if screen_name.lower() not in [t.lower() for t in CORE_TOPICS]:
+                            cursor.execute("SELECT * FROM potential_partners WHERE screen_name=?", (screen_name,))
+                            if not cursor.fetchone():
+                                print(_("discovered_new_potential_entity", screen_name=screen_name))
+                                cursor.execute("INSERT INTO potential_partners (screen_name, discovery_date, status) VALUES (?, ?, ?)", (screen_name, datetime.now().isoformat(), 'discovered'))
+                                conn.commit()
 
-                for handle in mentioned_handles:
-                    screen_name = f"@{handle}"
-                    if screen_name not in CORE_TOPICS:
-                        cursor.execute("SELECT * FROM potential_partners WHERE screen_name=?", (screen_name,))
-                        if not cursor.fetchone():
-                            print(_("discovered_new_potential_entity", screen_name=screen_name))
-                            cursor.execute("INSERT INTO potential_partners (screen_name, discovery_date, status) VALUES (?, ?, ?)", (screen_name, datetime.now().isoformat(), 'discovered'))
-                            conn.commit()
-
+                # --- Logic for liking ---
                 if random.random() <= LIKE_CHANCE:
-                    # Check if the tweet is already liked (contains an 'unlike' button)
-                    if target_tweet.find_elements(By.XPATH, ".//button[@data-testid='unlike']"):
-                         log_debug("Tweet already liked, skipping like action.")
-                         continue # Move to the next tweet in the loop
-
-                    like_buttons = target_tweet.find_elements(By.XPATH, ".//button[@data-testid='like']")
-                    if like_buttons:
-                        robust_click(driver, like_buttons[0])
-                        print(_("liked_post_on_profile", target_profile=target_profile))
-                        log_action("monitor_core_subjects", target_profile, "SUCCESS_LIKED")
-                
-                # The 'break' is removed, so the loop will continue for all sampled tweets
+                    # Check if the tweet is not already liked
+                    if not target_tweet.find_elements(By.XPATH, ".//button[@data-testid='unlike']"):
+                        like_buttons = target_tweet.find_elements(By.XPATH, ".//button[@data-testid='like']")
+                        if like_buttons:
+                            robust_click(driver, like_buttons[0])
+                            print(_("liked_post_on_profile", target_profile=target_profile))
+                            log_action("monitor_core_subjects", target_profile, "SUCCESS_LIKED")
+                            # Add a small delay after an action to let the page settle
+                            random_delay(1, 2) 
+                    else:
+                        log_debug("Tweet already liked, skipping like action.")
 
             except NoSuchElementException:
                 log_debug(_("skipping_post_no_text", target_profile=target_profile))
                 continue
+            except Exception as e:
+                # Catching other potential errors during loop
+                print(f"⚠️ Warning: An error occurred while processing a tweet on {target_profile}'s profile: {e}")
+                continue # Move to the next tweet
+
+
     except Exception as e:
         print(_("error_monitoring_profile", target_profile=target_profile, e=e))
 
@@ -822,11 +871,39 @@ def run_agent():
         if not driver or not login_to_twitter(driver):
             agent_running = False
             return
+
+        # --- NEW: Handle --force-action flag ---
+        if args.force_action:
+            print(f"\n--- ⚠️  DEBUG MODE: Forcing single action: '{args.force_action}' ⚠️ ---\n")
+            
+            action_map = {
+                'post': lambda d, t: post_tweet(d, *generate_tweet_content(analyze_market_context_for_prompt(conduct_market_research()))),
+                'mentions': lambda d, t: scan_and_reply_to_mentions(d),
+                'browse': lambda d, t: browse_following_feed_and_engage(d),
+                'monitor': lambda d, t: monitor_core_subjects(d, target_override=t), # Pass target here
+                'discover': lambda d, t: curiosity_driven_discovery(d),
+                'reflect': lambda d, t: perform_self_reflection(d)
+            }
+
+            # Get the function to run from our map
+            action_to_run = action_map.get(args.force_action)
+
+            if action_to_run:
+                # Execute the chosen function, passing the driver and the optional target
+                action_to_run(driver, args.target) 
+            else:
+                print(f"Error: Unknown action '{args.force_action}'.")
+
+            print("\n--- ✅ DEBUG ACTION COMPLETE. SHUTTING DOWN. ✅ ---\n")
+            return # Exit after the forced action is done
+        # --- END of --force-action handler ---
+
+        # This is the original main loop, which runs only if no flag is provided
         while agent_running:
             if not agent_running: break
             update_last_seen(LAST_SEEN_FILE)
             evaluate_strategy(driver)
-            action_target = CURRENT_GOAL # Use the goal itself as the target for now
+            action_target = CURRENT_GOAL
             action_history.append((CURRENT_GOAL, action_target, datetime.now()))
             if len(action_history) > 20:
                 action_history.pop(0)
@@ -848,10 +925,6 @@ def run_agent():
             elif CURRENT_GOAL == "MONITOR_CORE_SUBJECTS":
                 monitor_core_subjects(driver)
             
-            action_history.append((CURRENT_GOAL, action_target, datetime.now()))
-            if len(action_history) > 20:
-                action_history.pop(0)
-
             if agent_running:
                 sleep_duration = random.randint(MIN_SLEEP_DURATION, MAX_SLEEP_DURATION)
                 print(_("cycle_complete_next_action", sleep_duration=sleep_duration))
