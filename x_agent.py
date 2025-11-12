@@ -22,7 +22,7 @@ import chromadb
 import requests
 
 
-# --- X_Agent v2.0.0 "The Functional Strategist" Configuration ---
+# --- X_Agent v2.1.0 (The Sentient Strategist) Configuration ---
 load_dotenv()
 # --- NEW BROWSER CONFIGURATION ---
 BROWSER_TYPE = os.getenv('BROWSER_TYPE', 'chrome').lower() 
