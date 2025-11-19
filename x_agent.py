@@ -1,9 +1,11 @@
 from openai import OpenAI
 import sqlite3
+import threading
 import time
 import random
 import os
-import threading
+import sys
+import traceback
 import json
 import re
 from datetime import datetime, timedelta
@@ -21,6 +23,38 @@ import pyperclip
 import chromadb
 import requests
 import argparse
+
+# --- NOWY KOD DO DYNAMICZNEGO TWORZENIA ŚCIEŻKI ---
+# 1. Znajdź absolutną ścieżkę do katalogu, w którym jest uruchomiony skrypt
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# 2. Stwórz pełną, absolutną ścieżkę do profilu bota
+profile_path_absolute = os.path.join(script_dir, 'agent_profile')
+
+# 3. Ustaw tę absolutną ścieżkę jako zmienną środowiskową
+#    To nadpisze wartość z pliku .env, jeśli tam istnieje
+os.environ['PROFILE_PATH'] = profile_path_absolute 
+
+
+def handle_exception(exc_type, exc_value, exc_traceback):
+    """Logs uncaught exceptions to a file."""
+
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    error_msg = f"--- CRASH LOG: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n"
+    error_msg += "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    error_msg += "---------------------------------------------------\n"
+    
+    log_file_path = os.path.join(os.getcwd(), 'crash_log.txt')
+    
+    with open(log_file_path, 'a') as f:
+        f.write(error_msg)
+    print(f"FATAL ERROR: The application has crashed. Details have been saved to {log_file_path}")
+
+sys.excepthook = handle_exception
+
 
 # --- Argument Parser for Debugging ---
 parser = argparse.ArgumentParser(description="Run the X_Agent with specific debugging flags.")
@@ -54,6 +88,7 @@ BROWSER_EXECUTABLE_PATH = os.getenv('BROWSER_EXECUTABLE_PATH')
 YOUR_PROFILE_URL = os.getenv('X_PROFILE_URL')
 LANGUAGE = os.getenv('AGENT_LANGUAGE', 'en')
 PROFILE_PATH = os.getenv('PROFILE_PATH')
+BROWSER_PROFILE = os.getenv('BROWSER_PROFILE')
 
 # --- Strategic Parameters ---
 DEBUG_MODE = os.getenv('DEBUG_MODE')
@@ -64,6 +99,7 @@ SELF_REFLECTION_HOURS = int(os.getenv('SELF_REFLECTION_HOURS'))
 LAST_SEEN_FILE = "last_seen.txt"; LAST_REFLECTION_FILE = "last_reflection.txt"; LAST_MENTIONS_CHECK_FILE = "last_mentions_check.txt"
 MIN_SLEEP_DURATION = int(os.getenv('MIN_SLEEP_DURATION'))
 MAX_SLEEP_DURATION = int(os.getenv('MAX_SLEEP_DURATION'))
+REPLY_PROMPT_TEMPLATE = os.getenv('REPLY_PROMPT_TEMPLATE')
 
 # --- Model & Chance Configuration ---
 REFLECTIVE_MODEL = "gpt-3.5-turbo"; CREATION_MODEL = "gpt-4-turbo"
@@ -73,14 +109,28 @@ agent_running = True; CURRENT_GOAL = "INITIALIZING"; action_history = []
 # --- Localization ---
 translations = {}
 
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        # Not running in a PyInstaller bundle, so the base path is the script's directory
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+
 def load_translations(lang_code):
     global translations
     try:
-        with open(f"locales/{lang_code}.json", "r", encoding="utf-8") as f:
+        # Use resource_path to find the locales folder correctly
+        locale_file = resource_path(os.path.join('locales', f'{lang_code}.json'))
+        with open(locale_file, "r", encoding="utf-8") as f:
             translations = json.load(f)
     except FileNotFoundError:
         print(f"Language file for '{lang_code}' not found. Falling back to 'en'.")
-        with open("locales/en.json", "r", encoding="utf-8") as f:
+        en_locale_file = resource_path(os.path.join('locales', 'en.json'))
+        with open(en_locale_file, "r", encoding="utf-8") as f:
             translations = json.load(f)
 
 def _(key, **kwargs):
@@ -126,7 +176,21 @@ def init_db():
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS observations (timestamp TEXT, tweet_id TEXT PRIMARY KEY, subject TEXT, content TEXT, status TEXT, likes INTEGER DEFAULT 0, retweets INTEGER DEFAULT 0)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS engagements (timestamp TEXT, engagement_type TEXT, target_tweet_id TEXT, content TEXT, status TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS potential_partners (screen_name TEXT PRIMARY KEY, discovery_date TEXT, status TEXT)''')
+    # --- ZMODYFIKOWANA TABELA PARTNERÓW ---
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS potential_partners (
+            screen_name TEXT PRIMARY KEY, 
+            discovery_date TEXT, 
+            status TEXT DEFAULT 'discovered', 
+            relevance_score INTEGER,
+            activity_score INTEGER,
+            legitimacy_score INTEGER,
+            llm_summary TEXT,
+            last_vetted_date TEXT,
+            -- NOWE KOLUMNY DLA DEEP DIVE --
+            strategic_recommendation TEXT 
+        )
+    ''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS action_log (timestamp TEXT, action_name TEXT, target TEXT, status TEXT)''')
     conn.commit()
     return conn, cursor
@@ -195,8 +259,6 @@ def type_via_clipboard(driver, element, text):
 def setup_driver():
     """
     Sets up the Selenium WebDriver using the built-in Selenium Manager.
-    Selenium Manager automatically detects the browser, downloads the correct driver,
-    and configures it without any external libraries.
     """
     print(_("initializing_research_terminal"))
     
@@ -218,11 +280,14 @@ def setup_driver():
         return None
 
     # --- Profile and General Options ---
+    
+    # options.add_argument("--headless=new")
+
     if PROFILE_PATH:
         options.add_argument(f"--user-data-dir={PROFILE_PATH}")
-        options.add_argument("--profile-directory=Default")
+        options.add_argument(f"--profile-directory={BROWSER_PROFILE}")
     
-    options.add_argument("--start-maximized")
+    # options.add_argument("--start-maximized") # ZAKOMENTOWANE, bo jest sprzeczne z headless
     options.add_argument("--disable-notifications")
     options.add_argument('--log-level=3')
     options.add_experimental_option('excludeSwitches', ['enable-logging'])
@@ -231,7 +296,6 @@ def setup_driver():
         print(_("initializing_browser_with_selenium_manager", browser=BROWSER_TYPE.capitalize()))
         
         # --- Simplified Driver Initialization ---
-        # We no longer create a 'Service' object. Selenium Manager handles it automatically.
         if BROWSER_TYPE in ['chrome', 'brave']:
             driver = webdriver.Chrome(options=options)
         elif BROWSER_TYPE == 'edge':
@@ -297,11 +361,16 @@ def get_autoreflaction_for_prompt(subject, current_goal, market_context=""):
         query_text = f"strategic insights about {subject} and market sentiment"
         response = client_openai.embeddings.create(input=[query_text], model="text-embedding-3-small")
         
-        # Query the vector memory for the most relevant insights
+        # Query the vector memory for the most relevant insights AND user directives
         strategic_insights_data = vector_memory.query(
-            query_embeddings=[response.data[0].embedding], 
-            n_results=2,  # Get the top 2 most relevant insights
-            where={"type": "insight"}
+            query_embeddings=[response.data[0].embedding],
+            n_results=3,  # Get top 3 results to include potential directives
+            where={
+                "$or": [
+                    {"type": "insight"},
+                    {"type": "user_directive"}
+                ]
+            }
         )
         
         # Format the insights if found
@@ -339,40 +408,63 @@ def generate_tweet_content(market_context="", subject_override=None):
 def _engage_with_thread(driver, target_tweet, engagement_type):
     try:
         log_debug(_("engaging_with_thread", target_tweet_id=target_tweet['id'], engagement_type=engagement_type))
-        print(_("navigating_to_tweet", url=target_tweet['url']))
-        driver.get(target_tweet['url'])
-        random_delay(5, 8)
-        if not agent_running: return
-        # --- NEW: Recall own context before replying ---
-        own_context = get_own_context_from_memory(target_tweet['text'])
-        reflection_report = get_autoreflaction_for_prompt(f"Engage with {engagement_type}", CURRENT_GOAL, target_tweet['text'])
-        # --- MODIFIED: Inject self-awareness into the prompt ---
-        reply_prompt = prompt_template.format(
-            observed_subject=f"a comment on a post: '{target_tweet['text']}'", 
-            successful_examples=f"{own_context}\n{reflection_report}" # Prepend own context
+        
+        if not REPLY_PROMPT_TEMPLATE:
+             print("BŁĄD: Brak zdefiniowanego REPLY_PROMPT_TEMPLATE w .env! Używam domyślnego.")
+             return
+
+        conversation_context = target_tweet.get("context", target_tweet.get('text', ''))
+        reply_prompt = REPLY_PROMPT_TEMPLATE.format(
+            conversation_history=conversation_context,
+            user_reply_text=target_tweet.get('text', '')
         )
+        log_debug(f"Sending this prompt to LLM: {reply_prompt}")
+
         response = client_openai.chat.completions.create(model=CREATION_MODEL, messages=[{"role": "user", "content": reply_prompt}])
         reply_content = response.choices[0].message.content.strip().strip('"')
-        if len(reply_content) > 280:
-            shortening_prompt = f"CRITICAL: Shorten this reply to WELL UNDER 280 characters. TEXT: '{reply_content}'"
+        
+        # --- NOWA, BARDZIEJ NIEZAWODNA LOGIKA SKRACANIA ---
+        max_attempts = 2
+        attempt = 0
+        while len(reply_content) > 280 and attempt < max_attempts:
+            attempt += 1
+            print(f"⚠️ Odpowiedź za długa ({len(reply_content)} znaków). Próba skrócenia nr {attempt}...")
+            
+            # W drugiej próbie bądź jeszcze bardziej bezwzględny
+            aggressiveness = "Ruthlessly shorten" if attempt > 1 else "Shorten"
+            
+            shortening_prompt = f"CRITICAL: The following text is for Twitter and MUST be under 280 characters. {aggressiveness} it to be WELL UNDER the limit. Preserve the core meaning. TEXT: '{reply_content}'"
+            
             response = client_openai.chat.completions.create(model=REFLECTIVE_MODEL, messages=[{"role": "user", "content": shortening_prompt}])
             reply_content = response.choices[0].message.content.strip().strip('"')
+
+        # Ostateczne zabezpieczenie: jeśli po próbach wciąż jest za długo, obetnij
+        if len(reply_content) > 280:
+            print("🚨 Skracanie przez AI nie powiodło się. Ucinam tekst siłowo.")
+            reply_content = reply_content[:277] + "..."
+
         print(_("prepared_strategic_comment", reply_content=reply_content))
+        
         reply_box = WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[data-testid="tweetTextarea_0"]')))
         type_via_clipboard(driver, reply_box, reply_content)
         random_delay()
+        
         post_button_xpath = "//button[(@data-testid='tweetButton' or @data-testid='tweetButtonInline') and not(@aria-disabled='true')]"
         post_button = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.XPATH, post_button_xpath)))
         robust_click(driver, post_button)
+        
         WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, "//div[@data-testid='toast']")))
         print(_("comment_sent_success", target_tweet_id=target_tweet['id']))
+        
         cursor.execute("INSERT INTO engagements VALUES (datetime('now'), ?, ?, ?, ?)", ('reply', target_tweet['id'], reply_content, 'success'))
         conn.commit()
         log_action(engagement_type, target_tweet['id'], "SUCCESS")
+        
     except Exception as e:
         print(f"❌ Error while engaging with thread: {type(e).__name__} - {e}")
+        traceback.print_exc()
         log_action(engagement_type, target_tweet.get('id', 'unknown'), f"FAILURE: {type(e).__name__} - {e}")
-
+        
 # --- Core Agent Action Functions ---
 def post_tweet(driver, subject, content):
     try:
@@ -399,83 +491,344 @@ def post_tweet(driver, subject, content):
         log_action("post_tweet", subject, f"FAILURE: {e}")
         return False
 
+
+# --- NOWA FUNKCJA: MODUŁ ANALITYKA PROJEKTÓW (POPRAWIONA) ---
+def vet_potential_partner(driver, partner_screen_name):
+    """
+    Przeprowadza szczegółową analizę (weryfikację) potencjalnego partnera,
+    oceniając go za pomocą LLM i zapisując wyniki w bazie danych.
+    """
+    print(f"🕵️  [Vetting] Rozpoczynam weryfikację profilu: {partner_screen_name}")
+    log_action("vet_potential_partner", partner_screen_name, "STARTED")
+    
+    cursor.execute("UPDATE potential_partners SET status='vetting' WHERE screen_name=?", (partner_screen_name,))
+    conn.commit()
+
+    try:
+        driver.get(f"https://twitter.com/{partner_screen_name.strip('@')}")
+        random_delay(5, 8)
+
+        # 1. Zbieranie danych z profilu
+        bio = ""
+        pinned_tweet_text = ""
+        recent_tweets_texts = []
+        
+        try:
+            bio_element = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[data-testid="UserDescription"]')))
+            bio = bio_element.text
+        except:
+            log_debug(f"Nie znaleziono bio dla {partner_screen_name}")
+
+        try:
+            pinned_tweet_container = driver.find_element(By.XPATH, "//div[contains(., 'Pinned')]//ancestor::article[@data-testid='tweet']")
+            pinned_tweet_text = pinned_tweet_container.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text
+        except NoSuchElementException:
+            log_debug(f"Nie znaleziono przypiętego tweeta dla {partner_screen_name}")
+            
+        tweets = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
+        for tweet in tweets[:5]:
+            try:
+                recent_tweets_texts.append(tweet.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text)
+            except:
+                continue
+
+        # --- POPRAWKA: Obliczamy sformatowaną listę tweetów PRZED f-stringiem ---
+        formatted_recent_tweets = "\n".join([f"  - {t}" for t in recent_tweets_texts])
+
+        # 2. Przygotowanie promptu dla analityka AI
+        analysis_prompt = f"""
+        Jesteś analitykiem projektów kryptowalutowych. Twoim zadaniem jest ocena profilu Twitter na podstawie dostarczonych danych. Twoje oceny muszą być obiektywne.
+
+        Profil do analizy: {partner_screen_name}
+        Core Topics agenta (kontekst): {', '.join(CORE_TOPICS)}
+
+        Dane z profilu:
+        - Bio: "{bio}"
+        - Przypięty Tweet: "{pinned_tweet_text}"
+        - Ostatnie Tweety:
+        {formatted_recent_tweets}
+
+        Twoje zadanie:
+        Oceń ten profil w skali 1-10 w trzech kategoriach:
+        1.  Relevance Score: Jak bardzo tematyka profilu pasuje do Core Topics agenta? (1=całkiem niepasujący, 10=idealnie pasujący)
+        2.  Activity Score: Jaka jest jakość i postrzegana częstotliwość publikacji? Czy angażują społeczność? (1=martwy profil, 10=bardzo aktywny i angażujący)
+        3.  Legitimacy Score: Czy profil wygląda na autentyczny projekt lub eksperta, a nie na bota, oszustwo lub farmę airdropów? (1=podejrzany, 10=bardzo wiarygodny)
+
+        Na koniec, stwórz jednozdaniowe, zwięzłe podsumowanie (llm_summary).
+
+        Zwróć TYLKO i wyłącznie obiekt JSON z kluczami: "relevance_score", "activity_score", "legitimacy_score", "summary".
+        Przykład: {{"relevance_score": 8, "activity_score": 7, "legitimacy_score": 9, "summary": "Projekt DeFi na Solanie z aktywną społecznością, skupiony na analizie on-chain."}}
+        """
+
+        # 3. Wywołanie LLM i zapis wyników
+        response = client_openai.chat.completions.create(
+            model=REFLECTIVE_MODEL,
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": analysis_prompt}]
+        )
+        
+        results = json.loads(response.choices[0].message.content)
+        
+        relevance = results.get('relevance_score', 0)
+        activity = results.get('activity_score', 0)
+        legitimacy = results.get('legitimacy_score', 0)
+        summary = results.get('summary', 'Brak podsumowania.')
+
+        if (relevance + activity + legitimacy) >= 24: # Ustawiamy wyższy próg dla kandydatów
+            final_status = 'deep_dive_candidate'
+        elif (relevance + activity + legitimacy) >= 18:
+            final_status = 'vetted' # Dobry, ale nie na tyle, by robić deep dive
+        else:
+            final_status = 'archived'
+
+        cursor.execute("""
+            UPDATE potential_partners 
+            SET status=?, relevance_score=?, activity_score=?, legitimacy_score=?, llm_summary=?, last_vetted_date=?
+            WHERE screen_name=?
+        """, (final_status, relevance, activity, legitimacy, summary, datetime.now().isoformat(), partner_screen_name))
+        conn.commit()
+        
+        print(f"✅ [Vetting] Weryfikacja {partner_screen_name} zakończona. Status: {final_status.upper()}, Wynik: R:{relevance} A:{activity} L:{legitimacy}")
+        log_action("vet_potential_partner", partner_screen_name, f"SUCCESS: {final_status}")
+        return True
+
+    except Exception as e:
+        print(f"❌ [Vetting] Błąd podczas weryfikacji {partner_screen_name}: {e}")
+        cursor.execute("UPDATE potential_partners SET status='discovered' WHERE screen_name=?", (partner_screen_name,))
+        conn.commit()
+        log_action("vet_potential_partner", partner_screen_name, f"FAILURE: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ [Vetting] Błąd podczas weryfikacji {partner_screen_name}: {e}")
+        cursor.execute("UPDATE potential_partners SET status='discovered' WHERE screen_name=?", (partner_screen_name,))
+        conn.commit()
+        log_action("vet_potential_partner", partner_screen_name, f"FAILURE: {e}")
+        return False
+
+    except Exception as e:
+        print(f"❌ [Vetting] Błąd podczas weryfikacji {partner_screen_name}: {e}")
+        # W razie błędu wracamy do statusu 'discovered', aby spróbować ponownie później
+        cursor.execute("UPDATE potential_partners SET status='discovered' WHERE screen_name=?", (partner_screen_name,))
+        conn.commit()
+        log_action("vet_potential_partner", partner_screen_name, f"FAILURE: {e}")
+        return False
+
+# --- NOWA FUNKCJA: MODUŁ GŁĘBOKIEJ ANALIZY (DEEP DIVE) ---
+def perform_deep_dive(driver, partner_screen_name):
+    """
+    Przeprowadza dogłębną analizę wysoce obiecującego partnera, buduje wewnętrzną
+    bazę wiedzy i formułuje rekomendację strategiczną.
+    """
+    print(f"🔬 [Deep Dive] Rozpoczynam głęboką analizę profilu: {partner_screen_name}")
+    log_action("perform_deep_dive", partner_screen_name, "STARTED")
+    cursor.execute("UPDATE potential_partners SET status='deep_dive' WHERE screen_name=?", (partner_screen_name,))
+    conn.commit()
+
+    try:
+        # 1. Rozszerzone zbieranie danych z profilu
+        driver.get(f"https://twitter.com/{partner_screen_name.strip('@')}")
+        random_delay(5, 8)
+        
+        print("... Zbieram rozszerzone dane z profilu...")
+        for _ in range(3):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            random_delay(2, 3)
+
+        tweets = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
+        tweet_texts = [t.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text for t in tweets[:20] if t.find_elements(By.CSS_SELECTOR, 'div[data-testid="tweetText"]')]
+
+        
+        formatted_tweets = "\n- ".join(tweet_texts)
+
+        
+        print("... Tworzę wewnętrzne memo analityczne...")
+        memo_prompt = f"""
+        Jesteś analitykiem wywiadu. Na podstawie tych tweetów, stwórz zwięzłe podsumowanie (research memo) dotyczące projektu {partner_screen_name}. Skup się na:
+        1. Głównej technologii i celu projektu.
+        2. Ostatnich kamieniach milowych i ogłoszeniach.
+        3. Sentymentu i zaangażowania społeczności (na podstawie ich własnych postów).
+        4. Potencjalnych pytań lub niewiadomych, które warto zbadać.
+        
+        Zebrane tweety:
+        {formatted_tweets}
+        """
+        response = client_openai.chat.completions.create(model=REFLECTIVE_MODEL, messages=[{"role": "user", "content": memo_prompt}])
+        research_memo = response.choices[0].message.content
+        
+        
+        embedding_response = client_openai.embeddings.create(input=[research_memo], model="text-embedding-3-small")
+        
+        
+        vector_memory.add(
+            embeddings=[embedding_response.data[0].embedding], 
+            documents=[research_memo], 
+            metadatas=[{"type": "research_memo", "subject": partner_screen_name}], 
+            ids=[f"memo_{partner_screen_name}_{int(datetime.now().timestamp())}"]
+        )
+
+        
+        print("... Analizuję sentyment zewnętrzny...")
+        search_query = f"({partner_screen_name}) -from:{partner_screen_name.strip('@')}"
+        driver.get(f"https://twitter.com/search?q={search_query}&src=typed_query&f=live")
+        random_delay(4, 6)
+        
+        mention_tweets = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
+        mention_texts = [t.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text for t in mention_tweets[:15] if t.find_elements(By.CSS_SELECTOR, 'div[data-testid="tweetText"]')]
+        
+        sentiment_summary = "Brak wystarczających wzmianek zewnętrznych do analizy."
+        if mention_texts:
+            # --- POPRAWKA: Przeniesienie .join() poza f-string ---
+            formatted_mentions = "\n- ".join(mention_texts)
+            sentiment_prompt = f"""
+            Oceń ogólny sentyment (pozytywny, negatywny, neutralny) tych wzmianek o {partner_screen_name}. 
+            Zidentyfikuj główne punkty pochwały i krytyki ze strony społeczności.
+            
+            Zebrane wzmianki:
+            {formatted_mentions}
+            """
+            response = client_openai.chat.completions.create(model=REFLECTIVE_MODEL, messages=[{"role": "user", "content": sentiment_prompt}])
+            sentiment_summary = response.choices[0].message.content
+
+            # --- POPRAWKA: Tworzymy embedding dla podsumowania sentymentu ---
+            embedding_response = client_openai.embeddings.create(input=[sentiment_summary], model="text-embedding-3-small")
+            vector_memory.add(
+                embeddings=[embedding_response.data[0].embedding],
+                documents=[sentiment_summary], 
+                metadatas=[{"type": "sentiment_summary", "subject": partner_screen_name}], 
+                ids=[f"sentiment_{partner_screen_name}_{int(datetime.now().timestamp())}"]
+            )
+
+        # 4. Finałowa Refleksja i Rekomendacja Strategiczna
+        print("... Formułuję ostateczną rekomendację strategiczną...")
+        final_prompt = f"""
+            Jesteś strategiem AI specjalizującym się w web3. Przeanalizowałeś projekt {partner_screen_name}.
+
+            TWOJE WEWNĘTRZNE MEMO:
+            {research_memo}
+
+            ANALIZA SENTYMENTU SPOŁECZNOŚCI:
+            {sentiment_summary}
+
+            Zadanie:
+            1.  Sformułuj rekomendację strategiczną. Wybierz jedną z opcji: PRIORITY_ALPHA, MONITORING, ARCHIVED.
+            2.  Zaproponuj **kreatywny i konkretny** następny krok, który jest **unikalnie dopasowany** do analizowanego projektu. Unikaj ogólników. Pomyśl o różnych formach zaangażowania: analitycznych postach, zadawaniu pytań, interakcji, proponowaniu współpracy.
+            3.  Zwróć TYLKO obiekt JSON z kluczami "status" i "next_step".
+
+            Oto kilka **różnorodnych** przykładów dla inspiracji, ale nie kopiuj ich:
+            - Przykład 1: {{"status": "PRIORITY_ALPHA", "next_step": "Stworzyć post na Twitterze analizujący ich tokenomię w porównaniu do projektu X."}}
+            - Przykład 2: {{"status": "PRIORITY_ALPHA", "next_step": "Zadać publiczne pytanie pod ich ostatnim postem o szczegóły dotyczące ich nadchodzącego airdropa."}}
+            - Przykład 3: {{"status": "MONITORING", "next_step": "Dodać ich CEO do prywatnej listy na Twitterze i obserwować jego aktywność przez następne 2 tygodnie."}}
+            """
+        response = client_openai.chat.completions.create(model=CREATION_MODEL, response_format={"type": "json_object"}, messages=[{"role": "user", "content": final_prompt}])
+        decision = json.loads(response.choices[0].message.content)
+        
+        final_status = decision.get("status", "MONITORING").lower()
+        next_step = decision.get("next_step", "Continue passive monitoring.")
+        
+        cursor.execute("UPDATE potential_partners SET status=?, strategic_recommendation=? WHERE screen_name=?", (final_status, next_step, partner_screen_name))
+        conn.commit()
+        
+        print(f"✅ [Deep Dive] Analiza {partner_screen_name} zakończona. Rekomendacja: {final_status.upper()}. Następny krok: {next_step}")
+        log_action("perform_deep_dive", partner_screen_name, f"SUCCESS: {final_status}")
+        return True
+
+    except Exception as e:
+        print(f"❌ [Deep Dive] Krytyczny błąd podczas analizy {partner_screen_name}: {e}")
+        cursor.execute("UPDATE potential_partners SET status='vetted' WHERE screen_name=?", (partner_screen_name,))
+        conn.commit()
+        log_action("perform_deep_dive", partner_screen_name, f"FAILURE: {e}")
+        return False
+
 def scan_and_reply_to_mentions(driver):
     print(_("action_scan_mentions"))
     log_action("scan_and_reply_to_mentions", "system", "STARTED")
     try:
         driver.get("https://twitter.com/notifications/mentions")
-        random_delay()
-        cursor.execute("SELECT target_tweet_id FROM engagements WHERE engagement_type='reply'")
+        random_delay(3, 5)
+
+        cursor.execute("SELECT target_tweet_id FROM engagements WHERE engagement_type LIKE '%reply%'")
         already_replied_ids = {row[0] for row in cursor.fetchall()}
-        mentions = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
-        if not mentions:
+        
+        mentions_elements = WebDriverWait(driver, 15).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'article[data-testid="tweet"]'))
+        )
+        if not mentions_elements:
             log_debug(_("no_tweet_elements_on_mentions_page"))
             return False
-        new_mentions = []
-        one_day_ago = datetime.now().astimezone() - timedelta(days=1)
-        for mention in mentions[:5]:
+
+        # KROK 1: Zbierz dane (ID, tekst) ze strony, ZANIM zaczniesz nawigować
+        mentions_data = []
+        five_days_ago = datetime.now().astimezone() - timedelta(days=5)
+        for mention in mentions_elements[:15]:
             try:
                 time_element = mention.find_element(By.TAG_NAME, 'time')
-                if datetime.fromisoformat(time_element.get_attribute('datetime').replace('Z', '+00:00')) < one_day_ago:
-                    log_debug(_("skipping_old_mention"))
+                mention_timestamp = datetime.fromisoformat(time_element.get_attribute('datetime').replace('Z', '+00:00'))
+                if mention_timestamp < five_days_ago:
                     continue
-                mention_id = mention.find_element(By.XPATH, ".//a[contains(@href, '/status/')]").get_attribute('href').split('/')[-1]
+
+                mention_url_element = mention.find_element(By.XPATH, ".//a[contains(@href, '/status/')]")
+                mention_id = mention_url_element.get_attribute('href').split('/')[-1]
+
                 if mention_id not in already_replied_ids:
-                    new_mentions.append({"id": mention_id, "text": mention.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text, "element": mention})
-            except:
+                    mention_text = mention.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text
+                    mentions_data.append({'id': mention_id, 'text': mention_text})
+            except Exception:
+                continue # Ignoruj błędy przy zbieraniu danych z pojedynczych tweetów
+
+        # KROK 2: Teraz, gdy mamy dane, iteruj po nich i wykonuj akcje
+        for data in mentions_data:
+            try:
+                print(f"Found a new, unhandled mention: {data['id']}. Engaging...")
+                full_context = get_conversation_history(driver, data['id'])
+                
+                target_tweet_data = {
+                    "id": data['id'],
+                    "text": data['text'],
+                    "url": f"https://twitter.com/i/web/status/{data['id']}",
+                    "context": full_context
+                }
+                
+                _engage_with_thread(driver, target_tweet_data, 'mention_reply_with_context')
+                return True # Sukces, znaleziono i obsłużono wzmiankę
+            except Exception as e:
+                log_debug(f"Error processing a mention {data['id']}, skipping. Reason: {e}")
                 continue
-        if not new_mentions:
-            log_debug(_("no_new_unhandled_mentions"))
-            return False
-        target_mention = new_mentions[0]
-        print(_("found_new_mention", target_mention_id=target_mention['id']))
-        if random.random() > REPLY_CHANCE:
-            log_debug(_("skipped_mention_reply_by_chance", target_mention_id=target_mention['id']))
-            return True
-        _engage_with_thread(driver, {"id": target_mention['id'], "text": target_mention['text'], "url": f"https://twitter.com/i/web/status/{target_mention['id']}"}, 'mention_reply')
-        return True
+        
+        log_debug(_("no_new_unhandled_mentions"))
+        return False
+
     except Exception as e:
         print(_("mentions_analysis_error", e=e))
         log_action("scan_and_reply_to_mentions", "system", f"FAILURE: {e}")
         return False
 
-# --- RESTORED AND IMPROVED FUNCTION ---
+
 def browse_following_feed_and_engage(driver):
     print(_("action_browse_following_feed"))
     log_action("browse_following_feed", "system", "STARTED")
     try:
         driver.get("https://twitter.com/home")
-        # Wait for a core element of the page to be visible, like the tweet composer
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, 'div[data-testid="tweetTextarea_0"]'))
         )
         print("Home page main components loaded.")
-        random_delay(2, 4) # Extra delay for dynamic elements to settle
+        random_delay(2, 4)
 
         try:
-            # --- START OF THE NEW, FINAL STRATEGY ---
-            # This XPath finds any link (<a> tag) that has a descendant element (<span>)
-            # which contains the exact text "Following". This is the most robust method
-            # when other attributes like href or data-testid are unreliable.
             following_tab_xpath = "//a[.//span[text()='Following']]"
-            
             print("Attempting to find and click the 'Following' tab...")
             following_tab = WebDriverWait(driver, 15).until(
                 EC.element_to_be_clickable((By.XPATH, following_tab_xpath))
             )
-            
             robust_click(driver, following_tab)
             print("Successfully switched to the 'Following' feed.")
-            random_delay(3, 5) # Wait for the new feed to load
-            # --- END OF THE NEW, FINAL STRATEGY ---
+            random_delay(3, 5)
         except Exception as e:
-            # Taking a screenshot on failure for debugging purposes
             screenshot_path = f"debug_screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
             driver.save_screenshot(screenshot_path)
-            print(f"Could not switch to 'Following' tab. A screenshot has been saved to: {screenshot_path}")
+            print(f"Could not switch to 'Following' tab. Screenshot saved to: {screenshot_path}")
             log_debug(f"Error details: {e}")
         
-        # Instead of scrolling, we simply fetch a solid pool of tweets from the top of the page
         tweets = WebDriverWait(driver, 15).until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'article[data-testid="tweet"]')))
         
         cursor.execute("SELECT target_tweet_id FROM engagements"); engaged_ids = {row[0] for row in cursor.fetchall()}
@@ -491,28 +844,28 @@ def browse_following_feed_and_engage(driver):
                 tweet_url = tweet_id_element.get_attribute('href')
                 tweet_id = tweet_url.split('/')[-1]
 
-                # --- IMPROVED FILTERING LOGIC WITH FULL LOGGING ---
-                author_handle = tweet.find_element(By.XPATH, ".//div[@data-testid='User-Name']//span[contains(text(), '@')]").text.strip().lower()
+                author_handle_element = tweet.find_element(By.XPATH, ".//div[@data-testid='User-Name']//span[contains(text(), '@')]")
+                author_handle = author_handle_element.text.strip().lower()
+                
                 if f"@{bot_username}" == author_handle:
                     log_debug(_("skipping_own_tweet", tweet_id=tweet_id))
                     continue
-                    
                 if tweet_id in engaged_ids:
                     log_debug(_("skipping_already_engaged_tweet", tweet_id=tweet_id))
                     continue
-                    
+                
                 time_element = tweet.find_element(By.TAG_NAME, 'time')
                 tweet_timestamp = datetime.fromisoformat(time_element.get_attribute('datetime').replace('Z', '+00:00'))
                 if tweet_timestamp < two_hours_ago:
                     log_debug(_("skipping_old_tweet", tweet_id=tweet_id))
                     continue
 
-                text_content = tweet.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text
+                text_content_element = tweet.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]')
+                text_content = text_content_element.text
                 if len(text_content) < 40:
                     log_debug(_("skipping_short_tweet", tweet_id=tweet_id))
                     continue
                 
-                # If it passed all filters, it's a good candidate
                 log_debug(_("tweet_qualified_as_candidate", tweet_id=tweet_id))
                 fresh_targets.append({"id": tweet_id, "text": text_content, "url": tweet_url, "index": i})
 
@@ -527,23 +880,12 @@ def browse_following_feed_and_engage(driver):
         print(_("identified_fresh_targets", len_fresh_targets=len(fresh_targets)))
         valid_indices = [t['index'] for t in fresh_targets]
         
-
-        # --- GENERIC PROMPT USING THE PERSONA PRIMER ---
-        scoring_prompt = f"""
-        {persona_primer} Analyze these fresh tweets from your 'following' feed. Your task is to identify the single most intellectually stimulating one to comment on, consistent with your character.
-
-        Valid indices are: {valid_indices}.
-
-        Return a JSON object with 'best_index' and a brief 'reason' for your choice.
-        Example: {{"best_index": {random.choice(valid_indices) if valid_indices else 0}, "reason": "This post aligns with my core research areas and allows for a nuanced, analytical comment."}}
-        If none are truly worthy, return an empty JSON.
-        """
+        scoring_prompt = f"""{persona_primer} Analyze these fresh tweets from your 'following' feed. Your task is to identify the single most intellectually stimulating one to comment on, consistent with your character. Valid indices are: {valid_indices}. Return a JSON object with 'best_index' and a brief 'reason' for your choice. Example: {{"best_index": {random.choice(valid_indices) if valid_indices else 0}, "reason": "This post aligns with my core research areas."}} If none are truly worthy, return an empty JSON."""
         
         response = client_openai.chat.completions.create(model=REFLECTIVE_MODEL, response_format={"type": "json_object"}, messages=[{"role": "user", "content": scoring_prompt}])
         decision = json.loads(response.choices[0].message.content)
         best_index = decision.get("best_index")
 
-        # --- IMPROVED AI DECISION LOGGING ---
         if best_index is None or best_index not in valid_indices:
             print(_("ai_did_not_select_target"))
             log_debug(_("ai_decision_reason", reason=decision.get('reason', 'No justification provided.')))
@@ -555,10 +897,13 @@ def browse_following_feed_and_engage(driver):
             return
 
         print(_("strategy_selected_fresh_target", target_tweet_id=target_tweet['id'], reason=decision.get('reason')))
+        print(f"Navigating to the selected feed post to gather context: {target_tweet['url']}")
+        target_tweet['context'] = get_conversation_history(driver, target_tweet['id'])
         _engage_with_thread(driver, target_tweet, "following_feed_reply")
 
     except Exception as e:
         print(_("error_browsing_feed", e=e))
+        traceback.print_exc()
         log_action("browse_following_feed", "system", f"FAILURE: {e}")
 
 # --- NEXT-GEN: Proactive Growth & Learning Functions ---
@@ -599,54 +944,65 @@ def analyze_market_context_for_prompt(raw_market_data):
 def monitor_core_subjects(driver, target_override=None):
     print(_("action_monitor_core_subjects"))
     log_action("monitor_core_subjects", "system", "STARTED")
+    target_profile = None
 
-    # --- NEW: Logic to handle the override ---
     if target_override:
         target_profile = target_override
         print(f"🎯 [Debug] Overriding target to: {target_profile}")
-    # --- Original logic runs if no override is provided ---
-    elif random.random() < 0.25:
-        cursor.execute("SELECT screen_name FROM potential_partners WHERE status='discovered' ORDER BY RANDOM() LIMIT 1")
-        partner = cursor.fetchone()
-        if partner:
-            target_profile = partner[0]
-            print(f"🤝 [Networking] Proactively checking potential partner: {target_profile}")
+    else:
+        if random.random() < 0.5:
+            cursor.execute("""
+                SELECT screen_name FROM potential_partners 
+                WHERE status='vetted' AND (relevance_score + activity_score + legitimacy_score) >= 22
+                ORDER BY last_vetted_date ASC LIMIT 1 
+            """)
+            vetted_partner = cursor.fetchone()
+            if vetted_partner:
+                target_profile = vetted_partner[0]
+                print(f"🤝 [Networking] Proactively engaging with high-value vetted partner: {target_profile}")
+    
+    if not target_profile:
+        if random.random() < 0.25:
+            cursor.execute("SELECT screen_name FROM potential_partners WHERE status='discovered' ORDER BY RANDOM() LIMIT 1")
+            partner = cursor.fetchone()
+            if partner:
+                target_profile = partner[0]
+                print(f"🤝 [Networking] Proactively checking potential partner: {target_profile}")
+            else:
+                target_profile = random.choice(CORE_TOPICS)
         else:
             target_profile = random.choice(CORE_TOPICS)
-    else:
-        target_profile = random.choice(CORE_TOPICS)
+            print(f"📚 [Research] Monitoring core topic: {target_profile}")
+
     try:
-        driver.get(f"https://twitter.com/{target_profile.strip('@')}") # Use .strip('@') for safety
+        driver.get(f"https://twitter.com/{target_profile.strip('@')}")
         random_delay(5, 10)
         
-        # Find initial tweets to determine the number of iterations
-        initial_tweets = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
-        if not initial_tweets:
-            log_debug(_("no_tweets_on_profile", target_profile=target_profile))
-            return
+        # Zamiast iterować po elementach, zbierzmy najpierw linki do tweetów
+        tweet_elements = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
+        tweet_links = []
+        for tweet in tweet_elements[:5]: # Sprawdź 5 najnowszych
+             try:
+                link = tweet.find_element(By.XPATH, ".//a[contains(@href, '/status/')]").get_attribute('href')
+                tweet_links.append(link)
+             except NoSuchElementException:
+                continue
 
-        # We will iterate a fixed number of times, re-finding the element each time
-        # to avoid the StaleElementReferenceException.
-        # We sample up to 5 tweets.
-        num_tweets_to_check = min(len(initial_tweets), 5)
-        
-        for i in range(num_tweets_to_check):
+        # Teraz, gdy mamy linki, możemy bezpiecznie nawigować
+        for link in tweet_links:
             if not agent_running: return
             try:
-                # Re-find all tweets in every iteration to get the fresh state
-                all_current_tweets = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
+                driver.get(link)
+                random_delay(4, 6)
                 
-                # If the page structure changed and we can't find the tweet, skip
-                if i >= len(all_current_tweets):
-                    log_debug(f"Could not re-find tweet at index {i}, DOM likely changed. Skipping.")
-                    continue
+                # Znajdź główny tweet na tej stronie
+                target_tweet = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, 'article[data-testid="tweet"]'))
+                )
                 
-                target_tweet = all_current_tweets[i]
-
                 tweet_text = target_tweet.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text
                 log_debug(_("scanning_post", tweet_text_preview=tweet_text[:40]))
                 
-                # --- Logic for finding partners ---
                 mentioned_handles = re.findall(r'@(\w+)', tweet_text)
                 if mentioned_handles:
                     for handle in mentioned_handles:
@@ -658,28 +1014,19 @@ def monitor_core_subjects(driver, target_override=None):
                                 cursor.execute("INSERT INTO potential_partners (screen_name, discovery_date, status) VALUES (?, ?, ?)", (screen_name, datetime.now().isoformat(), 'discovered'))
                                 conn.commit()
 
-                # --- Logic for liking ---
                 if random.random() <= LIKE_CHANCE:
-                    # Check if the tweet is not already liked
                     if not target_tweet.find_elements(By.XPATH, ".//button[@data-testid='unlike']"):
                         like_buttons = target_tweet.find_elements(By.XPATH, ".//button[@data-testid='like']")
                         if like_buttons:
                             robust_click(driver, like_buttons[0])
                             print(_("liked_post_on_profile", target_profile=target_profile))
                             log_action("monitor_core_subjects", target_profile, "SUCCESS_LIKED")
-                            # Add a small delay after an action to let the page settle
                             random_delay(1, 2) 
                     else:
                         log_debug("Tweet already liked, skipping like action.")
-
-            except NoSuchElementException:
-                log_debug(_("skipping_post_no_text", target_profile=target_profile))
-                continue
             except Exception as e:
-                # Catching other potential errors during loop
                 print(f"⚠️ Warning: An error occurred while processing a tweet on {target_profile}'s profile: {e}")
-                continue # Move to the next tweet
-
+                continue
 
     except Exception as e:
         print(_("error_monitoring_profile", target_profile=target_profile, e=e))
@@ -714,22 +1061,41 @@ def curiosity_driven_discovery(driver):
                 candidate_threads = []
                 for i, tweet in enumerate(tweets[:10]):
                     try:
-                        tweet_text = tweet.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text
-                        tweet_id = tweet.find_element(By.XPATH, ".//a[contains(@href, '/status/')]").get_attribute('href').split('/')[-1]
+                        tweet_text_element = tweet.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]')
+                        tweet_text = tweet_text_element.text
+                        tweet_url_element = tweet.find_element(By.XPATH, ".//a[contains(@href, '/status/')]")
+                        tweet_url = tweet_url_element.get_attribute('href')
+                        tweet_id = tweet_url.split('/')[-1]
+                        
                         cursor.execute("SELECT * FROM engagements WHERE target_tweet_id=?", (tweet_id,))
                         if not cursor.fetchone():
-                            candidate_threads.append({"id": tweet_id, "text": tweet_text, "url": tweet.find_element(By.XPATH, ".//a[contains(@href, '/status/')]").get_attribute('href'), "index": i})
-                    except:
+                            # Pobierz pełny kontekst od razu
+                            full_context = get_conversation_history(driver, tweet_id)
+                            candidate_threads.append({
+                                "id": tweet_id,
+                                "text": tweet_text,
+                                "url": tweet_url,
+                                "context": full_context, # Przekaż kontekst dalej
+                                "index": i
+                            })
+                            # Wróć na stronę wyników wyszukiwania, bo get_conversation_history zmieniło URL
+                            driver.get(search_url)
+                            random_delay(2, 3)
+
+                    except Exception as e:
+                        log_debug(f"Error processing a candidate tweet: {e}")
                         continue
 
                 if not candidate_threads:
-                    log_debug("No fresh, unengaged candidates.")
+                    log_debug("No fresh, unengaged candidates found in this mode.")
                     continue
                 
                 log_debug(_("passing_candidates_to_ai", len_candidates=len(candidate_threads)))
                 valid_indices = [t['index'] for t in candidate_threads]
-                # --- GENERIC PROMPT USING THE PERSONA PRIMER ---
-                scoring_prompt = f""" {persona_primer} Analyze these tweets discovered during a research expedition on the topic of '{query}'. Your objective is to identify the single most intellectually stimulating thread to engage with.Valid indices are: {valid_indices}.Return a JSON object containing only the 'best_index'. """
+                
+                # Użyj persona_primer do promptu
+                scoring_prompt = f"""{persona_primer} Analyze these tweets discovered during a research expedition on the topic of '{query}'. Your objective is to identify the single most intellectually stimulating thread to engage with. Valid indices are: {valid_indices}. Return a JSON object containing only the 'best_index'. If none are worthy, return an empty JSON."""
+                
                 response = client_openai.chat.completions.create(model=REFLECTIVE_MODEL, response_format={"type": "json_object"}, messages=[{"role": "user", "content": scoring_prompt}])
                 decision = json.loads(response.choices[0].message.content)
                 best_index = decision.get("best_index")
@@ -738,13 +1104,21 @@ def curiosity_driven_discovery(driver):
                     log_debug(_("ai_did_not_select_discovery_target"))
                     continue
 
-                hot_thread = next(t for t in candidate_threads if t["index"] == best_index)
-                print(_("discovery_found_promising_thread", hot_thread_id=hot_thread['id']))
-                _engage_with_thread(driver, hot_thread, "discovery_reply")
-                return
+                hot_thread = next((t for t in candidate_threads if t["index"] == best_index), None)
+                if hot_thread:
+                    print(_("discovery_found_promising_thread", hot_thread_id=hot_thread['id']))
+                    print(f"Ensuring navigation to the selected thread: {hot_thread['url']}")
+                    driver.get(hot_thread['url'])
+                    random_delay(5, 8)
+                    
+                    _engage_with_thread(driver, hot_thread, "discovery_reply")
+                    return # Zakończ po udanej akcji
+                
             log_debug(_("no_discoveries_in_mode", mode=mode_name))
         except Exception as e:
             print(_("discovery_expedition_error", attempt=attempt + 1, e=e))
+            traceback.print_exc()
+            
     print(_("expedition_ended_without_results"))
 
 def perform_self_reflection(driver):
@@ -808,55 +1182,90 @@ def perform_self_reflection(driver):
         print(_("resetting_self_reflection_timer"))
         update_last_seen(LAST_REFLECTION_FILE)
 
+def get_conversation_history(driver, leaf_tweet_id):
+    """
+    Wchodzi na stronę tweeta i próbuje zrekonstruować historię konwersacji,
+    idąc "w górę" od najnowszej odpowiedzi.
+    Zwraca sformatowany string z historią.
+    """
+    print(f" reconstruuję historię wątku dla tweeta {leaf_tweet_id}...")
+    try:
+        driver.get(f"https://twitter.com/i/web/status/{leaf_tweet_id}")
+        random_delay(5, 8)
+        
+        conversation = []
+        # Znajdź wszystkie tweety na stronie (oryginalny post + odpowiedzi)
+        tweets_on_page = driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]')
+        
+        # Heurystyka: Twitter zwykle wyświetla tweety w porządku chronologicznym lub
+        # z głównym tweetem na górze i odpowiedziami poniżej.
+        # Zbierzemy teksty i autorów, aby móc je sformatować.
+        
+        for tweet in tweets_on_page:
+            try:
+                author_handle = tweet.find_element(By.XPATH, ".//div[@data-testid='User-Name']//span[contains(text(), '@')]").text
+                tweet_text = tweet.find_element(By.CSS_SELECTOR, 'div[data-testid="tweetText"]').text
+                conversation.append(f"{author_handle}: {tweet_text}")
+            except NoSuchElementException:
+                # Pomiń tweety, w których nie można znaleźć autora lub tekstu (np. usunięte)
+                continue
+        
+        if not conversation:
+            return "Could not retrieve conversation history."
+            
+        # Połącz historię w jeden czytelny blok tekstu
+        # Usuwamy duplikaty, które mogą się pojawić, i odwracamy kolejność
+        unique_conversation = list(dict.fromkeys(conversation))
+        return "\n".join(unique_conversation)
+
+    except Exception as e:
+        print(f"Błąd podczas pobierania historii konwersacji: {e}")
+        return "Error retrieving history."
+
 # --- The Strategic Brain ---
 def evaluate_strategy(driver):
     global CURRENT_GOAL
     print(_("strategy_evaluating_state"))
     
-    # --- Start of New Logic: Action Cooldown ---
-    # Get the names of the last 3 actions performed
     last_three_actions = [a[0] for a in action_history[-3:]]
     log_debug(_("last_actions", actions=", ".join(last_three_actions) if last_three_actions else "None"))
 
-    # Base weights for actions
-    actions = {"BROWSE_FOLLOWING_FEED": 0.5, "CURIOSITY_DRIVEN_DISCOVERY": 0.3, "MONITOR_CORE_SUBJECTS": 0.2}
+    # --- NOWA LOGIKA PRIORYTETÓW v2 ---
 
-    # Dynamically reduce weight of recently performed actions
-    for action_name in last_three_actions:
-        if action_name in actions:
-            actions[action_name] *= 0.25  # Drastically reduce the chance of repeating recent actions
-    
-    log_debug(_("dynamic_weights", weights=json.dumps({k: round(v, 2) for k, v in actions.items()})))
-    # --- End of New Logic ---
-
+    # 1. Samorefleksja (konserwacja)
     if check_if_time_passed(LAST_REFLECTION_FILE, SELF_REFLECTION_HOURS):
-        cursor.execute("SELECT 1 FROM observations WHERE status IN ('published', 'reviewed') LIMIT 1")
-        if cursor.fetchone():
-            CURRENT_GOAL = "SELF_REFLECTION"
-            print(_("strategy_goal_self_reflection", goal=CURRENT_GOAL))
-            return
+        CURRENT_GOAL = "SELF_REFLECTION"; print(f"🎯 [Strategy] Goal: {CURRENT_GOAL}"); return
 
-    if check_if_time_passed(LAST_MENTIONS_CHECK_FILE, 0.16):
+    # 2. Głęboka Analiza (badanie) - WYSOKI PRIORYTET
+    cursor.execute("SELECT 1 FROM potential_partners WHERE status='deep_dive_candidate' LIMIT 1")
+    if cursor.fetchone() and random.random() < 0.5: # 50% szansy, by nie zdominowało pętli
+        CURRENT_GOAL = "DEEP_DIVE"; print(f"🎯 [Strategy] Goal: {CURRENT_GOAL}"); return
+
+    # 3. Wstępna Weryfikacja (selekcja)
+    cursor.execute("SELECT 1 FROM potential_partners WHERE status='discovered' LIMIT 1")
+    if cursor.fetchone() and random.random() < 0.3:
+        CURRENT_GOAL = "VET_POTENTIAL_PARTNER"; print(f"🎯 [Strategy] Goal: {CURRENT_GOAL}"); return
+
+    # 4. Reakcja na wzmianki (networking)
+    if check_if_time_passed(LAST_MENTIONS_CHECK_FILE, 0.16) and scan_and_reply_to_mentions(driver):
         update_last_seen(LAST_MENTIONS_CHECK_FILE)
-        if scan_and_reply_to_mentions(driver):
-            CURRENT_GOAL = "NURTURE_ENGAGEMENT"
-            print(_("strategy_goal_nurture_engagement", goal=CURRENT_GOAL))
-            return
-        else:
-            log_debug(_("mention_scan_completed"))
-
+        CURRENT_GOAL = "NURTURE_ENGAGEMENT"; print(f"🎯 [Strategy] Goal: {CURRENT_GOAL}"); return
+    
+    # 5. Publikacja nowego posta (kreacja)
     cursor.execute("SELECT timestamp FROM observations ORDER BY timestamp DESC LIMIT 1")
     last_post_time_str = cursor.fetchone()
     if not last_post_time_str or (datetime.now() - datetime.fromisoformat(last_post_time_str[0]) > timedelta(hours=4)):
-        # Check if the last action wasn't already posting to avoid post loops
         if "EXPAND_REACH" not in last_three_actions:
-            CURRENT_GOAL = "EXPAND_REACH"
-            print(_("strategy_goal_expand_reach", goal=CURRENT_GOAL))
-            return
+            CURRENT_GOAL = "EXPAND_REACH"; print(f"🎯 [Strategy] Goal: {CURRENT_GOAL}"); return
 
-    # Choose the next action based on the new, dynamic weights
+    # 6. Akcje Tła (utrzymanie)
+    actions = {"BROWSE_FOLLOWING_FEED": 0.5, "CURIOSITY_DRIVEN_DISCOVERY": 0.3, "MONITOR_CORE_SUBJECTS": 0.2}
+    for action_name in last_three_actions:
+        if action_name in actions: actions[action_name] *= 0.25
+    
+    log_debug(_("dynamic_weights", weights=json.dumps({k: round(v, 2) for k, v in actions.items()})))
     CURRENT_GOAL = random.choices(list(actions.keys()), weights=list(actions.values()), k=1)[0]
-    print(_("strategy_goal_weighted_random", goal=CURRENT_GOAL))
+    print(f"🎯 [Strategy] Goal: {CURRENT_GOAL} (Background activity)")
 
 # --- Main Agent Loop ---
 def run_agent():
@@ -883,6 +1292,7 @@ def run_agent():
                 'monitor': lambda d, t: monitor_core_subjects(d, target_override=t), # Pass target here
                 'discover': lambda d, t: curiosity_driven_discovery(d),
                 'reflect': lambda d, t: perform_self_reflection(d)
+                
             }
 
             # Get the function to run from our map
@@ -924,6 +1334,34 @@ def run_agent():
                 browse_following_feed_and_engage(driver)
             elif CURRENT_GOAL == "MONITOR_CORE_SUBJECTS":
                 monitor_core_subjects(driver)
+            # --- NOWA GAŁĄŹ OBSŁUGI CELU ---
+            elif CURRENT_GOAL == "VET_POTENTIAL_PARTNER":
+                # --- POCZĄTEK BLOKU DO WKLEJENIA ---
+
+                # Sprawdź, ilu partnerów zweryfikowano dzisiaj
+                cursor.execute("SELECT COUNT(*) FROM action_log WHERE action_name='vet_potential_partner' AND DATE(timestamp) = DATE('now', 'localtime')")
+                vetted_today = cursor.fetchone()[0]
+
+                VETTING_DAILY_LIMIT = 2  # Ustaw dzienny limit tutaj, np. 10 weryfikacji
+
+                if vetted_today < VETTING_DAILY_LIMIT:
+                    cursor.execute("SELECT screen_name FROM potential_partners WHERE status='discovered' ORDER BY RANDOM() LIMIT 1")
+                    partner_to_vet = cursor.fetchone()
+                    if partner_to_vet:
+                        # Wykonaj weryfikację
+                        vet_potential_partner(driver, partner_to_vet[0])
+                    else:
+                        log_debug("VET_POTENTIAL_PARTNER goal was set, but no discovered partners were found.")
+                else:
+                    log_debug(f"Daily vetting limit of {VETTING_DAILY_LIMIT} reached. Skipping for today.")
+            elif CURRENT_GOAL == "DEEP_DIVE":
+                cursor.execute("SELECT screen_name FROM potential_partners WHERE status='deep_dive_candidate' ORDER BY RANDOM() LIMIT 1")
+                partner_to_analyze = cursor.fetchone()
+                if partner_to_analyze:
+                    perform_deep_dive(driver, partner_to_analyze[0])
+                else:
+                    log_debug("DEEP_DIVE goal was set, but no candidates were found.")
+            
             
             if agent_running:
                 sleep_duration = random.randint(MIN_SLEEP_DURATION, MAX_SLEEP_DURATION)

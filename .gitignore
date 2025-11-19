@@ -16,6 +16,12 @@ __pycache__/
 agent_state.db
 agent_memory_db/
 
+#Build
+build/
+dist/
+run.py
+utils.py
+
 # Session and state files 
 twitter_session.pkl
 last_seen.txt
@@ -23,7 +29,7 @@ last_reflection.txt
 last_mentions_check.txt
 
 # Browser profiles 
-brave_profile/
+agent_profile/
 
 # OS-specific files
 .DS_Store
@@ -31,3 +37,5 @@ Thumbs.db
 
 # Log files (good practice to add)
 *.log
+crash_log.txt
+X_Agent_Launcher.spec
