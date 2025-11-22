@@ -15,6 +15,10 @@ __pycache__/
 # Local Databases 
 agent_state.db
 agent_memory_db/
+agent_brain.db
+temp_visual.jpg
+agent_memory_vector
+
 
 #Build
 build/
@@ -39,3 +43,5 @@ Thumbs.db
 *.log
 crash_log.txt
 X_Agent_Launcher.spec
+Launcher/chat_interface.py
+chat_interface.py
