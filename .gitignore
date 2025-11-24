@@ -18,7 +18,10 @@ agent_memory_db/
 agent_brain.db
 temp_visual.jpg
 agent_memory_vector
-
+pathogen_vector_store
+pathogen_memory.db
+*.jpg
+backup_processed_ids.txt
 
 #Build
 build/
