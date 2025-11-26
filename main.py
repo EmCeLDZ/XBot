@@ -60,45 +60,86 @@ class Logger:
         sys.stdout.write("\r" + " " * 60 + "\r")
         print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚡ System Activated.")
 
+
 # --- 1. CONFIGURATION ---
 class Config:
-    # API & PROJECT
+    # --- API & PROJECT (From .env) ---
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
     PROJECT_NAME = os.getenv('PROJECT_NAME', 'Pathogen Protocol')
-    WEBSITE_URL = os.getenv('WEBSITE_URL', 'https://pathogenprotocol.xyz')
-    DISCORD_INVITE = os.getenv('DISCORD_INVITE', '')
-    
-    # BRANDING & HASHTAGS
-    PROJECT_TAGS = ["#PathogenProtocol", "$PATHOGEN", "#Solana"]
-    
-    # LORE & SYSTEM
-    LORE_KNOWLEDGE = os.getenv('LORE_KNOWLEDGE', "IDENTITY: Dr. Pathogen. ROLE: Clinical Virologist of DeFi.")
-    
-    # MODEL ECONOMY
-    MODEL_SMART = "gpt-4-turbo" 
-    MODEL_CHEAP = "gpt-4o-mini" 
+    WEBSITE_URL = os.getenv('WEBSITE_URL')
+    DISCORD_INVITE = os.getenv('DISCORD_INVITE')
+    MY_HANDLE = os.getenv('MY_HANDLE')
+    GROWTH_GOAL = os.getenv('GROWTH_GOAL')
+    LAUNCH_PHASE = os.getenv('LAUNCH_PHASE')
 
-    # BROWSER SETTINGS (CRITICAL FOR BRAVE)
+    # --- BRANDING & TAGS (Comma separated in .env) ---
+    _tags_raw = os.getenv('PROJECT_TAGS', "")
+    PROJECT_TAGS = [t.strip() for t in _tags_raw.split(',') if t.strip()]
+
+    # --- LORE & KNOWLEDGE ---
+    LORE_KNOWLEDGE = os.getenv('LORE_KNOWLEDGE')
+    
+    # --- MODEL ECONOMY ---
+    MODEL_SMART = os.getenv('MODEL_SMART', "gpt-4o")
+    MODEL_CHEAP = os.getenv('MODEL_CHEAP', "gpt-4o-mini")
+    DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
+
+    # --- BROWSER SETTINGS ---
     BROWSER_TYPE = os.getenv('BROWSER_TYPE', 'chrome').lower()
     BROWSER_EXECUTABLE_PATH = os.getenv('BROWSER_EXECUTABLE_PATH')
     BROWSER_PROFILE = os.getenv('BROWSER_PROFILE', 'Default')
+    # Budujemy pełną ścieżkę do profilu względem skryptu
     PROFILE_PATH = os.path.join(script_dir, os.getenv('PROFILE_PATH', 'agent_profile'))
 
-    # VISUALS (Fixed Style)
+    # --- VISUALS & STYLE ---
     GENERATE_IMAGES = os.getenv('GENERATE_IMAGES', 'True').lower() == 'true'
-    # Wymuszony styl z kodu, aby uniknąć błędów parsowania .env
-    IMAGE_STYLE = "aesthetic: abstract bio-hazard data, toxic green and black, medical hud interface, microscopic view, high detail, dark atmosphere. NEGATIVE: blue, purple, red, pink, text, watermark, logo, typography, letters, words, alphabet, blurry, cartoon, face"
+    IMAGE_STYLE = os.getenv('IMAGE_STYLE')
 
-    # TIMING
+    # 1. Parsowanie SAFE_VISUALS (Separator: | PIPE)
+    _visuals_raw = os.getenv('SAFE_VISUALS')
+    if _visuals_raw:
+        # Dzielimy po '|' bo w promptach są przecinki
+        SAFE_VISUALS = [v.strip() for v in _visuals_raw.split('|') if v.strip()]
+    else:
+        # Backup na wypadek błędu w .env
+        SAFE_VISUALS = ["abstract macro shot of digital virus cells interacting with green data stream"]
+
+    # 2. Słownik elementów dynamicznych (HARDCODED LOGIC - To musi tu być dla VisualCortex)
+    VISUAL_ELEMENTS = {
+        "SUBJECT": [
+            "digital virus cell", "blockchain node structure", "encrypted data packet", 
+            "cybernetic skull", "bio-hazard containment vial", "holographic DNA strand",
+            "glitched security shield", "liquid data stream"
+        ],
+        "ACTION": [
+            "mutating in real time", "breaking through firewall", "being scanned by laser",
+            "dissolving into code", "pulsing with toxic energy", "locking down system"
+        ],
+        "STYLE_MODIFIER": [
+            "macro photography", "wide angle hud view", "electron microscope style",
+            "isometric 3d render", "abstract glitch art", "wireframe blueprint"
+        ]
+    }
+
+    GROWTH_TARGETS = ["solana", "aeyakovenko", "zachxbt", "coindesk", "cz_binance", "VitalikButerin", "SolanaFloor"]
+
+    # --- SCAM HUNTING & KEYWORDS (Comma separated) ---
+    _keywords_raw = os.getenv('SCAM_KEYWORDS')
+    if _keywords_raw:
+        SCAM_KEYWORDS = [k.strip() for k in _keywords_raw.split(',') if k.strip()]
+    else:
+        SCAM_KEYWORDS = ["claim airdrop", "official mint", "validate wallet"]
+
+    # --- TIMING ---
     MIN_SLEEP = int(os.getenv('MIN_SLEEP_DURATION', 45))
     MAX_SLEEP = int(os.getenv('MAX_SLEEP_DURATION', 180))
     POST_COOLDOWN_MINUTES = int(os.getenv('POST_COOLDOWN_MINUTES', 120))
 
-    # SELF AWARENESS
-    MY_HANDLE = os.getenv('MY_HANDLE')
-    GROWTH_GOAL = os.getenv('GROWTH_GOAL')
+    # --- PROMPT TEMPLATES (From .env) ---
+    PROMPT_TEMPLATE = os.getenv('PROMPT_TEMPLATE')
+    REPLY_PROMPT_TEMPLATE = os.getenv('REPLY_PROMPT_TEMPLATE')
 
-    # SELECTORS
+    # --- TECHNICAL SELECTORS (Hardcoded - Twitter structure) ---
     SELECTORS = {
         "TWEET_INPUT": 'div[data-testid="tweetTextarea_0"]',
         "TWEET_BTN": '[data-testid="tweetButton"]',
@@ -109,17 +150,6 @@ class Config:
         "LINK_TO_TWEET": ".//a[contains(@href, '/status/')]",
         "CLOSE_MODAL": '[data-testid="app-bar-close"]'
     }
-
-    # Safe Prompts (Hardcoded for stability)
-    SAFE_VISUALS = [
-        "abstract macro shot of digital virus cells interacting with green data stream",
-        "dark hud interface displaying verifying security protocols in emerald green",
-        "geometric 3d structure of a blockchain node infected by green pathogen",
-        "cybernetic microscope view of code vulnerability, matrix style green lighting",
-        "abstract data visualization shield protecting core, dark aesthetic"
-    ]
-    
-    SCAM_KEYWORDS = ["claim airdrop", "official mint", "migration required", "validate wallet", "distribution live"]
 
 # --- 2. PROCESS MANAGER ---
 class ProcessManager:
@@ -211,15 +241,26 @@ class ViralIntelligence:
 class VisualCortex:
     def generate(self, ignored_context=None):
         if not Config.GENERATE_IMAGES: return None
-        Logger.log("VISUAL", "Synthesizing visual data (Green/Abstract)...")
+        Logger.log("VISUAL", "Synthesizing visual data (Dynamic)...")
         try:
-            base = random.choice(Config.SAFE_VISUALS)
-            full_prompt = f"{base}, {Config.IMAGE_STYLE}"
+            # 1. Budowanie dynamicznego promptu
+            subj = random.choice(Config.VISUAL_ELEMENTS["SUBJECT"])
+            act = random.choice(Config.VISUAL_ELEMENTS["ACTION"])
+            mod = random.choice(Config.VISUAL_ELEMENTS["STYLE_MODIFIER"])
+            
+            # 2. Sklejenie w całość
+            # Np: "digital virus cell mutating in real time, macro photography, aesthetic: toxic green..."
+            full_prompt = f"{subj} {act}, {mod}, {Config.IMAGE_STYLE}"
+            
+            # Logujemy co wymyślił (dla Twojej informacji)
+            Logger.log("VISUAL", f"Prompt: {subj} | {mod}")
+            
             safe_prompt = full_prompt.replace(" ", "%20")
             
-            # Wymuszamy seed i nologo, żeby uniknąć tekstu
-            seed = random.randint(1, 999999)
-            url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=768&model=flux&nologo=true&enhance=false&seed={seed}"
+            # 3. Zmieniamy SEED za każdym razem
+            seed = random.randint(1, 9999999)
+            # Używamy flux-realism lub flux-anime dla różnorodności, albo zostańmy przy flux
+            url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=768&model=flux&nologo=true&enhance=true&seed={seed}"
             
             res = requests.get(url, timeout=20)
             if res.status_code == 200:
@@ -229,7 +270,6 @@ class VisualCortex:
         except Exception as e:
             Logger.error(f"Visual gen failed: {e}")
         return None
-
 # --- 5. DATABASE ---
 # --- 5. DATABASE ---
 class DatabaseManager:
@@ -358,7 +398,7 @@ class DatabaseManager:
         self.cursor.execute("SELECT timestamp FROM engagements WHERE user_handle='SELF' ORDER BY timestamp DESC LIMIT 1")
         res = self.cursor.fetchone()
         return datetime.fromisoformat(res[0]) if res else None
-        
+
 # --- 6. BROWSER ENGINE (FIXED FOR BRAVE) ---
 class BrowserEngine:
     def __init__(self):
@@ -443,64 +483,87 @@ class AgentBrain:
                 response_format={"type": "json_object"}
             )
             return json.loads(res.choices[0].message.content)
-        except Exception: return {}
+        except Exception:
+            return {}
 
     def analyze_situation(self, text, stats, risk_data, market_context):
-        # --- SAFETY RAIL: Blokada fałszywych oskarżeń ---
-        risk_score = risk_data.get('score', 0)
-        
-        # Jeśli ryzyko jest niskie i brak słów-kluczy scamu, AI ma zakaz ostrzegania
-        if risk_score < 20 and "claim" not in text.lower():
-            return {"decision": "IGNORE", "reasoning": "Risk score too low for intervention."}
-        # ------------------------------------------------
-
-        sys_prompt = f"""
-        {Config.LORE_KNOWLEDGE}
-        TASK: Analyze tweet. MARKET: {market_context}
-        INPUT: Tweet="{text}", Risk={risk_score}/100.
+        # CZĘŚĆ STATYCZNA (To będzie cache'owane przez OpenAI - 50% taniej po 1. zapytaniu)
+        static_instructions = """
+        IDENTITY: AI Crypto Security Analyst.
+        TASK: Classify crypto tweet risk based on provided data.
         
         RULES:
-        1. Risk < 30: IGNORE.
-        2. Risk 30-70: INVESTIGATE (Ask politely).
-        3. Risk > 70: WARNING (Clinical alert).
+        1. IF Risk Score < 40 and text is generic -> IGNORE.
+        2. IF Risk Score 40-75 -> INVESTIGATE (Ask short question).
+        3. IF Risk Score > 75 -> WARNING (Generate alert).
         
-        OUTPUT JSON: {{ "decision": "IGNORE/INVESTIGATE/WARNING", "reply_content": "...", "broadcast_content": "...", "reasoning": "..." }}
+        OUTPUT FORMAT (JSON):
+        { "decision": "IGNORE/INVESTIGATE/WARNING", "reply_content": "text", "broadcast_content": "text" }
         """
-        return self._query(sys_prompt, "Analyze.", model=Config.MODEL_SMART)
+
+        # CZĘŚĆ DYNAMICZNA (Doklejana na końcu)
+        dynamic_context = f"""
+        --- CURRENT DATA ---
+        MARKET CONTEXT: {market_context}
+        CALCULATED RISK SCORE: {risk_data.get('score', 0)}/100.
+        """
+        
+        # Sklejenie w jeden system prompt (Statyczne na górze!)
+        full_system_prompt = static_instructions + dynamic_context
+        
+        return self._query(full_system_prompt, f"Tweet to analyze: {text}", model=Config.MODEL_CHEAP)
 
     def generate_broadcast(self, topic, market_context):
-        sys_prompt = f"""
+        past_context = self.db.get_relevant_memory(topic)
+        
+        # STATYCZNE (LORE + Styl + Format) - Idzie do Cache
+        static_part = f"""
         {Config.LORE_KNOWLEDGE}
-        TASK: Write a viral post about {topic}.
-        CONTEXT: {market_context}.
         
-        STYLE:
-        - Clinical, ominous but protective.
-        - Mention {Config.WEBSITE_URL}.
+        IDENTITY: You are Dr. Pathogen.
+        STYLE GUIDE:
+        - Clinical, insightful, short sentences.
+        - No emojis.
+        - Must mention {Config.WEBSITE_URL}.
         - TAGS: {', '.join(Config.PROJECT_TAGS)}.
-        - NO FLUFF.
         
-        OUTPUT JSON: {{ "content": "Tweet text here" }}
+        OUTPUT FORMAT: JSON with key "content".
         """
-        return self._query(sys_prompt, "Generate.", model=Config.MODEL_SMART)
+        
+        # DYNAMICZNE (Temat + Pamięć + Rynek)
+        dynamic_part = f"""
+        --- MISSION CONTEXT ---
+        TOPIC: {topic}
+        MARKET STATUS: {market_context}
+        RELEVANT MEMORY: {past_context[:500]} 
+        """
+        
+        full_system = static_part + dynamic_part
+        return self._query(full_system, "Generate post now.", model=Config.MODEL_CHEAP)
 
-    def decide_next_move(self, profile_stats, recent_posts, market_status):
-        history_str = ", ".join(recent_posts)
-        prompt = f"""
-        IDENTITY: {Config.LORE_KNOWLEDGE} GOAL: {Config.GROWTH_GOAL}
-        STATS: {profile_stats}
-        HISTORY: {history_str}
-        MARKET: {market_status}
+    def generate_growth_reply(self, target_user, tweet_text, market_status):
+        # 1. System Prompt (Instrukcje + LORE) - Cache'owane
+        sys_prompt = f"""
+        IDENTITY: Dr. Pathogen.
+        GOAL: Write a short, witty reply to {target_user} to gain visibility.
+        CONTEXT: Promoting '{Config.PROJECT_NAME}' (Anti-Rug tool).
         
         RULES:
-        - Don't repeat the same action type twice in a row.
-        - If market is RED -> BROADCAST_EDU or WARNING.
-        - If market is GREEN -> GROWTH_HACK or BROADCAST_MARKET.
-        
-        ACTIONS: SCAM_HUNT, BROADCAST_EDU, BROADCAST_MARKET, CHECK_MENTIONS, GROWTH_HACK.
-        OUTPUT JSON: {{ "action": "ACTION_NAME", "reasoning": "..." }}
+        1. Be clinical/ominous but helpful.
+        2. Max 1 sentence.
+        3. NO HASHTAGS.
+        4. OUTPUT JSON: {{ "reply_content": "Text here" }}
         """
-        return self._query(prompt, "Direct mission.", model=Config.MODEL_SMART)
+        
+        # 2. User Prompt (Dynamiczne dane: Rynek + Tweet)
+        user_msg = f"""
+        MARKET STATUS: {market_status}
+        TARGET TWEET: "{tweet_text}"
+        Generate reply.
+        """
+        
+        # Używamy taniego modelu (Config.MODEL_CHEAP / gpt-4o-mini)
+        return self._query(sys_prompt, user_msg, model=Config.MODEL_CHEAP)
 
 # --- 8. PROFILE MANAGER ---
 class ProfileManager:
@@ -537,6 +600,7 @@ class ProfileManager:
         return int(float(re.sub(r"[^0-9.]", "", text)) * mult)
 
 # --- 9. MAIN AGENT ---
+# --- 9. MAIN AGENT ---
 class PathogenAgent:
     def __init__(self):
         ProcessManager.kill_stale_bot_processes()
@@ -545,55 +609,114 @@ class PathogenAgent:
         self.brain = AgentBrain(self.db)
         self.browser = BrowserEngine()
         self.visual = VisualCortex()
-        self.profile = ProfileManager(self.browser.driver, self.db)
-
+        
     def run(self):
         Logger.log("SYSTEM", f"PROTOCOL ONLINE. Identity: {Config.MY_HANDLE}")
         self.browser.driver.get("https://twitter.com/home")
         
+        # Logowanie wstępne (czekamy na input tweeta jako dowód zalogowania)
         if not self.browser.wait_for(Config.SELECTORS["TWEET_INPUT"], timeout=20):
             Logger.log("SYSTEM", "Please log in manually if needed.")
             time.sleep(30)
-        
-        my_stats = self.profile.perform_audit()
             
         while True:
             try:
+                # 1. Analiza Rynku
                 market_status = self.market.get_market_sentiment()
-                recent_activity = self.db.get_recent_post_types(limit=5)
-                my_stats['trend'] = self.db.get_growth_trend()
                 
-                Logger.log("MARKET", market_status)
+                # 2. Wybór Strategii
+                # Zwiększamy szanse na SCAM_HUNT i GROWTH_HACK, bo to buduje zasięgi
+                actions = ["SCAM_HUNT", "GROWTH_HACK", "CHECK_MENTIONS", "BROADCAST_EDU"]
+                weights = [35, 30, 15, 20] 
                 
-                # Decyzja Strategiczna
-                strategy = self.brain.decide_next_move(my_stats, recent_activity, market_status)
-                action = strategy.get('action', 'SCAM_HUNT')
-                reason = strategy.get('reasoning', 'Default')
+                action = random.choices(actions, weights=weights)[0]
                 
-                # Cooldown Check
+                # 3. Obsługa Cooldownu (Tylko dla nowych postów BROADCAST)
                 last_post = self.db.get_last_post_time()
-                if last_post and "BROADCAST" in action:
+                cooldown_active = False
+                if last_post:
                     minutes = (datetime.now() - last_post).total_seconds() / 60
                     if minutes < Config.POST_COOLDOWN_MINUTES:
-                        Logger.log("SKIP", f"Cooldown ({int(minutes)}m). Switching to patrol.")
-                        action = "SCAM_HUNT"
+                        cooldown_active = True
 
-                Logger.log("STRATEGY", f"Executing: {action}. Reason: {reason}")
+                # Jeśli wylosowano BROADCAST, ale jest cooldown -> Przełączamy na GROWTH_HACK
+                # (Growth Hack i Odpisywanie jest dozwolone podczas cooldownu)
+                if action.startswith("BROADCAST") and cooldown_active:
+                    Logger.log("SKIP", f"Cooldown active ({int(minutes)}m). Switching to GROWTH_HACK.")
+                    action = "GROWTH_HACK"
+
+                Logger.log("STRATEGY", f"Executing: {action}")
                 
-                if action == "SCAM_HUNT": self._scam_hunt(market_status)
-                elif "BROADCAST" in action: self._broadcast(action, market_status)
-                elif action == "CHECK_MENTIONS": self._check_mentions()
-                elif action == "GROWTH_HACK": self._growth_hack(market_status)
+                # --- WYKONANIE AKCJI ---
+                if action == "SCAM_HUNT": 
+                    self._scam_hunt(market_status)
+                elif action == "GROWTH_HACK": 
+                    self._growth_hack(market_status)
+                elif action == "CHECK_MENTIONS": 
+                    self._check_mentions()
+                elif "BROADCAST" in action: 
+                    self._broadcast(action, market_status)
 
+                # Hibernacja losowa
                 sleep_time = random.randint(Config.MIN_SLEEP, Config.MAX_SLEEP)
                 Logger.timer(sleep_time)
-                
-                if random.randint(1, 10) == 1: my_stats = self.profile.perform_audit()
 
-            except KeyboardInterrupt: break
+            except KeyboardInterrupt: 
+                break
             except Exception as e:
                 Logger.error(f"Loop Error: {e}")
+                traceback.print_exc()
                 time.sleep(60)
+
+    def _growth_hack(self, market_status):
+        """Wchodzi na profile gigantów i komentuje ich posty (Shilling)"""
+        # Pobieramy listę celów z Configu (z zabezpieczeniem defaultowym)
+        targets = getattr(Config, "GROWTH_TARGETS", ["solana", "aeyakovenko", "zachxbt", "coindesk"])
+        target = random.choice(targets)
+        
+        Logger.log("GROWTH", f"Invading territory of: @{target}")
+        
+        try:
+            self.browser.driver.get(f"https://twitter.com/{target}")
+            
+            # Czekamy na tweety (Timeline)
+            if not self.browser.wait_for(Config.SELECTORS["TIMELINE_TWEET"], timeout=10):
+                Logger.log("GROWTH", "Target timeline unavailable/empty.")
+                return
+
+            # Pobieramy tweety
+            tweets = self.browser.driver.find_elements(By.CSS_SELECTOR, Config.SELECTORS["TIMELINE_TWEET"])
+            if not tweets: return
+            
+            # Bierzemy pierwszy (najnowszy) tweet
+            latest_tweet = tweets[0]
+            
+            try:
+                tweet_text = latest_tweet.text
+                
+                # Link do tweeta jako ID (żeby nie spamować tego samego)
+                link_el = latest_tweet.find_element(By.XPATH, Config.SELECTORS["LINK_TO_TWEET"])
+                tid = link_el.get_attribute('href').split('/')[-1]
+                
+                # CZY JUŻ TAM BYLIŚMY?
+                if self.db.exists(tid):
+                    Logger.log("GROWTH", "Already infected this tweet. Aborting.")
+                    return
+                
+                # Generujemy SHILL
+                res = self.brain.generate_growth_reply(target, tweet_text, market_status)
+                reply_text = res.get('reply_content')
+                
+                if reply_text:
+                    Logger.log("BRAIN", f"Growth Hack Reply: {reply_text}")
+                    self._reply_to_tweet(latest_tweet, reply_text)
+                    self.db.save_interaction(tid, target, reply_text, "GROWTH_HACK")
+                
+            except Exception as e:
+                Logger.error(f"Growth analysis failed: {e}")
+                
+        except Exception as e:
+            Logger.error(f"Growth Hack logic failed: {e}")
 
     def _scam_hunt(self, market_context):
         keyword = random.choice(Config.SCAM_KEYWORDS)
@@ -601,141 +724,155 @@ class PathogenAgent:
         
         self.browser.driver.get(f"https://twitter.com/search?q={keyword}&src=typed_query&f=live")
         
-        # Czekamy na tweety
         if not self.browser.wait_for(Config.SELECTORS["TIMELINE_TWEET"], timeout=10):
             Logger.log("PATROL", "No targets found.")
             return
 
-        # 1. ZBIERANIE DANYCH (Snapshot)
-        # Pobieramy elementy od razu, żeby uniknąć "StaleElementReference" przy odświeżaniu DOM
+        # Pobieramy tweety (Snapshot)
         found_tweets = []
         try:
             elements = self.browser.driver.find_elements(By.CSS_SELECTOR, Config.SELECTORS["TIMELINE_TWEET"])[:5]
             for el in elements:
                 try:
-                    # Wyciągamy link (ID) i tekst
                     link_el = el.find_element(By.XPATH, Config.SELECTORS["LINK_TO_TWEET"])
-                    url = link_el.get_attribute('href')
-                    text = el.text
-                    tid = url.split('/')[-1]
-                    found_tweets.append({"obj": el, "url": url, "tid": tid, "text": text})
+                    found_tweets.append({"obj": el, "url": link_el.get_attribute('href'), "tid": link_el.get_attribute('href').split('/')[-1], "text": el.text})
                 except: continue
-        except Exception as e:
-            Logger.error(f"Snapshot failed: {e}")
-            return
+        except: return
 
-        # 2. PRZETWARZANIE
-        processed_count = 0
+        # PRZETWARZANIE (Z LIMITEREM)
+        processed_count = 0 
+        
         for item in found_tweets:
+            # Limit bezpieczeństwa: max 1 analiza AI na cykl
+            if processed_count >= 1:
+                Logger.log("PATROL", "Cycle limit reached. Hibernating.")
+                break
+
             tid = item['tid']
             text = item['text']
             
-            # --- WARSTWA OCHRONY PAMIĘCI ---
-            # Sprawdź czy ID już było
-            if self.db.exists(tid):
-                continue
-            
-            # Sprawdź czy TREŚĆ już była (ochrona przed spam-botami wrzucającymi to samo)
+            # 1. Sprawdź Cache
+            if self.db.exists(tid): continue
             if self.db.is_content_seen(text):
-                Logger.log("PATROL", f"Skipping duplicate content (TID: {tid})")
                 self.db.mark_as_seen(tid, text, "DUPLICATE_IGNORE")
                 continue
-            # -------------------------------
 
             try:
-                # Parsowanie usera
-                handle = "Unknown"
-                if "@" in text:
-                    handle = re.search(r"@(\w+)", text).group(0)
-
-                # Sprawdź ticker
-                ticker_match = re.search(r'\$([a-zA-Z]{2,8})', text)
+                # 2. Python Filter (DARMOWY)
                 risk_data = {"score": 0}
-                if ticker_match:
-                    risk_data = self.market.analyze_token_risk(ticker_match.group(1))
+                if "$" in text:
+                    ticker = re.search(r'\$([a-zA-Z]{2,8})', text)
+                    if ticker: risk_data = self.market.analyze_token_risk(ticker.group(1))
+
+                # Jeśli ryzyko małe i brak słów kluczowych -> SKIP (0 kosztów)
+                if risk_data['score'] < 30 and "drain" not in text.lower() and "hacked" not in text.lower():
+                    Logger.log("PATROL", f"Skipping low risk ({risk_data['score']}).")
+                    self.db.mark_as_seen(tid, text, "LOW_RISK_IGNORE")
+                    continue
                 
-                # ANALIZA AI
-                analysis = self.brain.analyze_situation(text, "Unknown stats", risk_data, market_context)
+                # 3. Analiza AI (PŁATNA) - Tylko jak przejdzie filtr
+                # Zwiększamy licznik, bo zaraz zapłacimy za tokeny
+                processed_count += 1
+                
+                analysis = self.brain.analyze_situation(text, "Unknown", risk_data, market_context)
                 decision = analysis.get('decision', 'IGNORE')
                 
-                Logger.log("BRAIN", f"Target: {handle} | Risk: {risk_data.get('score')} | Decision: {decision}")
-                
-                # 3. WYKONANIE AKCJI
+                Logger.log("BRAIN", f"Risk: {risk_data['score']} | Decision: {decision}")
+
                 if decision == "WARNING":
-                    alert_text = f"🚨 PATHOGEN DETECTED.\n\nTarget: {handle}\nRisk Factor: {risk_data.get('score')}/100\nDiagnosis: {analysis.get('broadcast_content')}\n\nStay Safe. Visit {Config.WEBSITE_URL}."
-                    img_path = self.visual.generate()
-                    
-                    self._post_new_tweet(alert_text, img_path)
-                    
-                    # Zapisujemy sukces
+                    alert_text = f"🚨 PATHOGEN DETECTED.\n\nRisk: {risk_data['score']}/100\n{analysis.get('broadcast_content')}\n\nProtocol: {Config.WEBSITE_URL}"
+                    img = self.visual.generate()
+                    self._post_new_tweet(alert_text, img)
                     self.db.mark_as_seen(tid, text, "SCAM_WARNING")
                     self.db.save_interaction(str(time.time()), "SELF", alert_text, "SCAM_BROADCAST")
-                    return # Kończymy rundę po jednej akcji (żeby nie spamować)
-
+                    return # Powrót do głównej pętli i spania
+                    
                 elif decision == "INVESTIGATE":
                     self._reply_to_tweet(item['obj'], analysis['reply_content'])
                     self.db.mark_as_seen(tid, text, "INVESTIGATED")
-                    return
-
+                    return # Powrót do głównej pętli i spania
+                    
                 else:
-                    # WAŻNE: Nawet jak ignorujemy, zapisujemy to!
-                    # Żeby w następnej pętli nie analizować tego samego.
-                    self.db.mark_as_seen(tid, text, "IGNORE_DECISION")
-
+                    self.db.mark_as_seen(tid, text, "IGNORE")
+                    
             except Exception as e:
-                Logger.error(f"Processing error: {e}")
+                Logger.error(f"Item error: {e}")
                 continue
 
     def _broadcast(self, type_name, market_context):
-        topic = "Market" if "MARKET" in type_name else "Security"
+        """Generuje nowy post (Edukacyjny lub Rynkowy)"""
+        topic = "Market Analysis" if "MARKET" in type_name else "DeFi Security"
         res = self.brain.generate_broadcast(topic, market_context)
+        
         if res.get('content'):
-            img = self.visual.generate()
-            self._post_new_tweet(res['content'], img)
+            img_path = self.visual.generate()
+            self._post_new_tweet(res['content'], img_path)
             self.db.save_interaction(str(time.time()), "SELF", res['content'], type_name)
 
     def _check_mentions(self):
-        Logger.log("ACTION", "Checking Mentions...")
-        self.browser.driver.get("https://twitter.com/notifications/mentions")
-        # (Uproszczona logika dla zwięzłości, pełna w poprzednich wersjach)
+        """Prosta logika sprawdzania wzmianek"""
+        # Na razie placeholder, Growth Hack ważniejszy.
+        # Można tu dodać logikę wchodzenia na https://twitter.com/notifications/mentions
         pass 
 
-    def _growth_hack(self, market_status):
-        targets = ["Solana", "aeyakovenko", "zachxbt", "coindesk"]
-        target = random.choice(targets)
-        Logger.log("GROWTH", f"Hacking reach of @{target}")
-        try:
-            self.browser.driver.get(f"https://twitter.com/{target}")
-            self.browser.wait_for(Config.SELECTORS["TIMELINE_TWEET"])
-            tweets = self.browser.driver.find_elements(By.CSS_SELECTOR, Config.SELECTORS["TIMELINE_TWEET"])
-            if tweets:
-                res = self.brain.analyze_situation(tweets[0].text, target, {}, market_status)
-                if res.get('reply_content'):
-                    self._reply_to_tweet(tweets[0], res['reply_content'])
-        except: pass
-
-    # --- POSTING LOGIC (FIXED ORDER) ---
     def _post_new_tweet(self, text, img_path=None):
+        """
+        Wstawia tweeta w bezpiecznej kolejności:
+        1. Upload Obrazka -> 2. Czekaj na przetworzenie -> 3. Tekst -> 4. Weryfikacja -> 5. Wyślij
+        """
         Logger.log("ACTION", "Navigating to Compose...")
         self.browser.driver.get("https://twitter.com/compose/tweet")
         
         box = self.browser.wait_for(Config.SELECTORS["TWEET_INPUT"], timeout=15)
-        if not box: return
+        if not box:
+            Logger.error("Compose modal failed to load.")
+            return
 
         try:
-            # 1. WPISZ TEKST
-            self.browser.type_human(box, text)
-            time.sleep(3) # Czekaj aż X przetworzy tekst
-            
-            # 2. DODAJ OBRAZ (Jeśli jest)
+            # --- 1. UPLOAD OBRAZKA (NAJPIERW) ---
             if img_path and os.path.exists(img_path):
                 Logger.log("ACTION", "Uploading visual...")
                 if self.browser.upload_file(img_path):
-                    time.sleep(8) # Długi czas na upload
+                    # Czekamy na "Remove media" (dowód załadowania)
+                    try:
+                        WebDriverWait(self.browser.driver, 20).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, '[aria-label="Remove media"]'))
+                        )
+                        Logger.log("ACTION", "Visual attached & verified.")
+                        time.sleep(1)
+                    except:
+                        Logger.error("Image upload processing timed out.")
             
-            # 3. KLIKNIJ
+            # --- 2. TEKST ---
+            # Odśwież element (DOM mógł się zmienić)
+            box = self.browser.wait_for(Config.SELECTORS["TWEET_INPUT"])
+            self.browser.safe_click(box)
+            time.sleep(0.5)
+            self.browser.type_human(box, text)
+            time.sleep(2)
+            
+            # --- 3. WERYFIKACJA ---
+            # Jeśli tekst zniknął (bug Reacta), wpisz ponownie
+            if not box.text or len(box.text.strip()) < 2:
+                Logger.log("ACTION", "Text vanished! Force retrying...")
+                box.send_keys(Keys.CONTROL + "a")
+                box.send_keys(Keys.DELETE)
+                time.sleep(0.5)
+                # Spróbuj wkleić ze schowka lub wpisać wolniej
+                try:
+                    import pyperclip
+                    pyperclip.copy(text)
+                    box.send_keys(Keys.CONTROL + "v")
+                except:
+                    self.browser.type_human(box, text)
+                time.sleep(2)
+
+            # --- 4. WYSYŁKA ---
             btn = self.browser.wait_clickable(Config.SELECTORS["TWEET_BTN"])
             if btn:
+                if btn.get_attribute("aria-disabled") == "true":
+                    Logger.error("Tweet button disabled. Content missing?")
+                    return
                 self.browser.safe_click(btn)
                 Logger.log("ACTION", "Tweet sent.")
                 time.sleep(5)
@@ -746,16 +883,20 @@ class PathogenAgent:
             Logger.error(f"Post failed: {e}")
 
     def _reply_to_tweet(self, tweet_element, text):
+        """Bezpieczne odpisywanie"""
         try:
             reply_icon = tweet_element.find_element(By.CSS_SELECTOR, Config.SELECTORS["REPLY_ICON"])
             self.browser.safe_click(reply_icon)
+            
             box = self.browser.wait_for(Config.SELECTORS["TWEET_INPUT"])
             self.browser.type_human(box, text)
+            
             btn = self.browser.wait_clickable(Config.SELECTORS["TWEET_BTN"])
             self.browser.safe_click(btn)
             Logger.log("ACTION", "Reply sent.")
             time.sleep(3)
         except:
+            # Escape zamyka modal w razie błędu
             ActionChains(self.browser.driver).send_keys(Keys.ESCAPE).perform()
 
 if __name__ == "__main__":
